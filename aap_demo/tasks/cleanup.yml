@@ -1,0 +1,35 @@
+---
+- name: Remove a shared-folder-root compatibility fixture after an interrupted run
+  keepersecurity.keeper_secrets_manager.keeper_remove:
+    uid: "{{ demo_root_record.record_uid }}"
+  when:
+    - demo_root_record.record_uid is defined
+    - not demo_root_record_removed | default(false) | bool
+    - not demo_keep_fixtures | default(false) | bool
+  no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+- name: Verify that cleanup cannot target the shared folder itself
+  ansible.builtin.assert:
+    that:
+      - demo_created_root.folder_uid != shared_folder_uid
+      - demo_root_name is match('^AAP-Demo-')
+    quiet: true
+  when:
+    - demo_created_root.folder_uid is defined
+    - not demo_keep_fixtures | default(false) | bool
+
+- name: Clean up the scenario folder and all its fixtures
+  keepersecurity.keeper_secrets_manager.keeper_delete_folder:
+    folder_uid: "{{ demo_created_root.folder_uid }}"
+    force_deletion: true
+  when:
+    - demo_created_root.folder_uid is defined
+    - not demo_keep_fixtures | default(false) | bool
+
+- name: Explain retained fixtures
+  ansible.builtin.debug:
+    msg: >-
+      Fixtures were retained. Use 07_cleanup.yml with demo_cleanup_folder_uid
+      and demo_cleanup_root_name from this job's artifacts. If a root compatibility
+      record remains after a failure, remove that record by its logged UID.
+  when: demo_keep_fixtures | default(false) | bool

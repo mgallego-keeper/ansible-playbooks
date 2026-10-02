@@ -53,6 +53,9 @@ env/
 *.log
 logs/
 
+# Local QA credentials and exported AAP job evidence
+/aap_demo/artifacts/
+
 # Temporary files
 *.tmp
 *.temp

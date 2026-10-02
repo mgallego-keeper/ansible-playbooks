@@ -1,0 +1,111 @@
+---
+- name: Verify the KSM QA execution environment before changing the vault
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    demo_scenario: preflight
+    demo_expected_collection_version: "1.5.0"
+    demo_reference_commit: "8402e39513ac3de65fe5e25baf9e1e021ed18371"
+
+  tasks:
+    - name: Validate the demo configuration
+      ansible.builtin.import_tasks: tasks/common.yml
+
+    - name: List installed Keeper collection versions and locations
+      ansible.builtin.command:
+        argv:
+          - ansible-galaxy
+          - collection
+          - list
+          - keepersecurity.keeper_secrets_manager
+      register: demo_collection_versions
+      changed_when: false
+
+    - name: Show collection provenance
+      ansible.builtin.debug:
+        var: demo_collection_versions.stdout_lines
+
+    - name: Require the intended collection version
+      ansible.builtin.assert:
+        that:
+          - demo_expected_collection_version in demo_collection_versions.stdout
+        fail_msg: >-
+          The intended QA collection version was not listed. Check the selected
+          execution environment and project collection overrides before proceeding.
+        quiet: true
+
+    - name: Resolve the new folder modules from the active collection path
+      ansible.builtin.command:
+        argv:
+          - ansible-doc
+          - --type
+          - module
+          - "{{ item }}"
+      loop:
+        - keepersecurity.keeper_secrets_manager.keeper_create_folder
+        - keepersecurity.keeper_secrets_manager.keeper_get_folder
+        - keepersecurity.keeper_secrets_manager.keeper_update_folder
+        - keepersecurity.keeper_secrets_manager.keeper_delete_folder
+      register: demo_module_docs
+      changed_when: false
+      failed_when: >-
+        demo_module_docs.rc != 0 or
+        'was not found' in demo_module_docs.stderr or
+        demo_module_docs.stdout | length == 0
+
+    - name: Show the resolved module locations
+      ansible.builtin.debug:
+        msg: "{{ item.stdout_lines | first }}"
+      loop: "{{ demo_module_docs.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Report the Python and SDK package versions
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - -c
+          - |
+            import json
+            import platform
+            from importlib.metadata import PackageNotFoundError, version
+            result = {"python": platform.python_version()}
+            for name in (
+                "ansible-core",
+                "keeper-secrets-manager-core",
+                "keeper-secrets-manager-helper",
+            ):
+                try:
+                    result[name] = version(name)
+                except PackageNotFoundError:
+                    result[name] = "NOT INSTALLED"
+            print(json.dumps(result, sort_keys=True))
+      register: demo_runtime_versions
+      changed_when: false
+
+    - name: Show runtime version evidence
+      ansible.builtin.debug:
+        msg: "{{ demo_runtime_versions.stdout }}"
+
+    - name: Display Keeper plugin information
+      keepersecurity.keeper_secrets_manager.keeper_info:
+
+    - name: Verify live access to the selected QA shared folder
+      keepersecurity.keeper_secrets_manager.keeper_get_folder:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+      register: demo_shared_folder
+
+    - name: Check the shared-folder response
+      ansible.builtin.assert:
+        that:
+          - demo_shared_folder.folder_uid == shared_folder_uid
+          - demo_shared_folder.parent_uid == ''
+        quiet: true
+
+    - name: Explain the remaining image provenance check
+      ansible.builtin.debug:
+        msg: >-
+          Reference source revision: {{ demo_reference_commit }}. Version strings
+          and module paths do not prove an image's source commit. Record the QA
+          image digest and verify its build provenance separately.

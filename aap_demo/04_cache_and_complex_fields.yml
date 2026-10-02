@@ -1,0 +1,159 @@
+---
+- name: Verify registered-cache and empty-complex-field regressions
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    demo_scenario: regressions
+    keeper_use_cache: false
+  vars_files:
+    - vars/fixtures.yml
+
+  tasks:
+    - name: Validate the demo configuration
+      ansible.builtin.import_tasks: tasks/common.yml
+
+    - name: Exercise the regressions with disposable fixtures
+      block:
+        - name: Create the scenario folder
+          ansible.builtin.import_tasks: tasks/setup.yml
+
+        - name: Create unpopulated standard and custom complex fields
+          keepersecurity.keeper_secrets_manager.keeper_create:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            subfolder_uid: "{{ demo_created_root.folder_uid }}"
+            record_type: address
+            title: "AAP empty complex fields {{ demo_run_id }}"
+            fields:
+              - type: address
+                value: []
+            custom_fields:
+              - type: name
+                label: Empty name
+                value: []
+              - type: host
+                label: Empty host
+                value: []
+          register: demo_empty_record
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Require successful complex-field record creation
+          ansible.builtin.assert:
+            that:
+              - demo_empty_record.record_uid | length > 0
+            quiet: true
+
+        - name: Create a login record for the cache round trip
+          keepersecurity.keeper_secrets_manager.keeper_create:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            subfolder_uid: "{{ demo_created_root.folder_uid }}"
+            record_type: login
+            title: "AAP cache login {{ demo_run_id }}"
+            fields:
+              - type: login
+                value: cache-user@example.invalid
+              - type: password
+                value: "{{ demo_password }}"
+            notes: "{{ demo_notes }}"
+          register: demo_cache_record
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Cache the record with the new registered-cache format
+          keepersecurity.keeper_secrets_manager.keeper_cache_records:
+            uids:
+              - "{{ demo_cache_record.record_uid }}"
+          register: demo_cached_records
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Read the password from the registered cache
+          keepersecurity.keeper_secrets_manager.keeper_get:
+            uid: "{{ demo_cache_record.record_uid }}"
+            field: password
+            cache: "{{ demo_cached_records.cache }}"
+          register: demo_cached_read
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Verify the cache round trip
+          ansible.builtin.assert:
+            that:
+              - demo_cached_read.value == demo_password
+            quiet: true
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Update the live vault record after taking the cache snapshot
+          keepersecurity.keeper_secrets_manager.keeper_set:
+            uid: "{{ demo_cache_record.record_uid }}"
+            field: password
+            value: "{{ demo_updated_password }}"
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Read the old snapshot again
+          keepersecurity.keeper_secrets_manager.keeper_get:
+            uid: "{{ demo_cache_record.record_uid }}"
+            field: password
+            cache: "{{ demo_cached_records.cache }}"
+          register: demo_old_snapshot
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Read fresh data without that snapshot
+          keepersecurity.keeper_secrets_manager.keeper_get:
+            uid: "{{ demo_cache_record.record_uid }}"
+            field: password
+          register: demo_fresh_read
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Verify that the snapshot does not silently refresh itself
+          ansible.builtin.assert:
+            that:
+              - demo_old_snapshot.value == demo_password
+              - demo_fresh_read.value == demo_updated_password
+            quiet: true
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Supply an unusable cache and require vault fallback
+          keepersecurity.keeper_secrets_manager.keeper_get:
+            uid: "{{ demo_cache_record.record_uid }}"
+            field: password
+            cache: "AAAA"
+          register: demo_fallback
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Verify the fallback value
+          ansible.builtin.assert:
+            that:
+              - demo_fallback.value == demo_updated_password
+            quiet: true
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Regenerate the registered cache after the update
+          keepersecurity.keeper_secrets_manager.keeper_cache_records:
+            uids:
+              - "{{ demo_cache_record.record_uid }}"
+          register: demo_refreshed_cache
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Read from the regenerated cache
+          keepersecurity.keeper_secrets_manager.keeper_get:
+            uid: "{{ demo_cache_record.record_uid }}"
+            field: password
+            cache: "{{ demo_refreshed_cache.cache }}"
+          register: demo_refreshed_read
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Verify the regenerated snapshot
+          ansible.builtin.assert:
+            that:
+              - demo_refreshed_read.value == demo_updated_password
+            quiet: true
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Explain the boundary of this regression test
+          ansible.builtin.debug:
+            msg: >-
+              Check for the unusable-cache warning in the job output. This job
+              exercises live cache use and invalid-cache fallback. It does not
+              prove rejection of executable pickle payloads; use the PR's
+              isolated cache security tests for that assurance.
+      always:
+        - name: Clean up this scenario's fixtures
+          ansible.builtin.import_tasks: tasks/cleanup.yml

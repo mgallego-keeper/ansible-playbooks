@@ -1,0 +1,18 @@
+---
+- name: Create this scenario's repeatable QA fixture folder
+  keepersecurity.keeper_secrets_manager.keeper_create_folder:
+    shared_folder_uid: "{{ shared_folder_uid }}"
+    folder_name: "{{ demo_root_name }}"
+  register: demo_created_root
+
+- name: Publish only fixture metadata for manual cleanup or workflow nodes
+  ansible.builtin.set_stats:
+    data:
+      demo_run_id: "{{ demo_run_id }}"
+      demo_cleanup_folder_uid: "{{ demo_created_root.folder_uid }}"
+      demo_cleanup_root_name: "{{ demo_root_name }}"
+    per_host: false
+
+- name: Show the fixture location for inspection in Keeper
+  ansible.builtin.debug:
+    msg: "QA fixture folder: {{ demo_root_name }} ({{ demo_created_root.folder_uid }})"

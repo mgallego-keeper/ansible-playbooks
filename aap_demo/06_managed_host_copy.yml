@@ -1,0 +1,78 @@
+---
+- name: Verify attachment delivery to a real managed Linux host
+  hosts: my_systems
+  gather_facts: false
+  vars:
+    demo_scenario: managed-copy
+  vars_files:
+    - vars/fixtures.yml
+
+  tasks:
+    - name: Validate the QA scope
+      ansible.builtin.import_tasks: tasks/common.yml
+
+    - name: Require the manually prepared harmless attachment fixture
+      ansible.builtin.assert:
+        that:
+          - demo_copy_record_uid is defined
+          - demo_copy_attachment_name is defined
+        fail_msg: >-
+          Attach the documented synthetic text file to a QA record and supply
+          demo_copy_record_uid and demo_copy_attachment_name. The inventory
+          group my_systems must contain a real managed Linux host.
+        quiet: true
+
+    - name: Copy and verify the fixture on the managed host
+      block:
+        - name: Create an isolated directory on the managed host
+          ansible.builtin.tempfile:
+            state: directory
+            prefix: ksm_aap_copy_
+          register: demo_copy_directory
+
+        - name: Copy the attachment from Keeper to the managed host
+          keepersecurity.keeper_secrets_manager.keeper_copy:
+            uid: "{{ demo_copy_record_uid }}"
+            file: "{{ demo_copy_attachment_name }}"
+            dest: "{{ demo_copy_directory.path }}/aap-demo.txt"
+            mode: "0600"
+          register: demo_copy_first
+          diff: false
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Repeat the same attachment copy
+          keepersecurity.keeper_secrets_manager.keeper_copy:
+            uid: "{{ demo_copy_record_uid }}"
+            file: "{{ demo_copy_attachment_name }}"
+            dest: "{{ demo_copy_directory.path }}/aap-demo.txt"
+            mode: "0600"
+          register: demo_copy_second
+          diff: false
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Read back the destination bytes
+          ansible.builtin.slurp:
+            src: "{{ demo_copy_directory.path }}/aap-demo.txt"
+          register: demo_copy_contents
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Inspect destination permissions
+          ansible.builtin.stat:
+            path: "{{ demo_copy_directory.path }}/aap-demo.txt"
+          register: demo_copy_stat
+
+        - name: Verify content, permissions, and copy idempotence
+          ansible.builtin.assert:
+            that:
+              - demo_copy_first is changed
+              - demo_copy_second is not changed
+              - demo_copy_contents.content | b64decode == demo_file_content
+              - demo_copy_stat.stat.mode == '0600'
+            quiet: true
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+      always:
+        - name: Remove this test's managed-host directory
+          ansible.builtin.file:
+            path: "{{ demo_copy_directory.path }}"
+            state: absent
+          when: demo_copy_directory.path is defined

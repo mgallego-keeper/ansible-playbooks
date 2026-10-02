@@ -1,0 +1,8 @@
+---
+# Copy these non-secret values into the AAP template Variables field.
+# Inject keeper_config with an AAP custom credential, not this file.
+shared_folder_uid: "REPLACE_WITH_QA_SHARED_FOLDER_UID"
+demo_qa_confirmed: true
+demo_run_id: "demo-austin-victoria"
+demo_keep_fixtures: false
+demo_protect_sensitive_tasks: false

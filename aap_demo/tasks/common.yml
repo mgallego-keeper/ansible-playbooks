@@ -1,0 +1,37 @@
+---
+- name: Require the QA scope and a reusable KSM credential
+  ansible.builtin.assert:
+    that:
+      - demo_qa_confirmed | default(false) | bool
+      - shared_folder_uid | default('') is string
+      - shared_folder_uid | default('') | length > 0
+      - shared_folder_uid != 'REPLACE_WITH_QA_SHARED_FOLDER_UID'
+      - keeper_config is defined
+      - not ansible_check_mode
+    fail_msg: >-
+      Supply the QA shared_folder_uid, set demo_qa_confirmed to true, and attach
+      the KSM credential. Use Run job type. The check-mode tests are individual
+      tasks, because not every create module supports a global check-mode run.
+    quiet: true
+
+- name: Choose a reproducible run identifier
+  ansible.builtin.set_fact:
+    demo_run_id: >-
+      {{ demo_run_id | default(awx_job_id |
+         default(now(utc=true, fmt='%Y%m%dT%H%M%S%f'), true), true) | string }}
+
+- name: Validate the identifier used in fixture names and paths
+  ansible.builtin.assert:
+    that:
+      - demo_run_id is match('^[A-Za-z0-9_.-]{1,64}$')
+    fail_msg: "demo_run_id must contain 1-64 ASCII letters, digits, dots, underscores, or hyphens."
+    quiet: true
+
+- name: Show the QA run metadata without printing the configuration
+  ansible.builtin.debug:
+    msg:
+      - "Scenario: {{ demo_scenario }}"
+      - "Run identifier: {{ demo_run_id }}"
+      - "Shared folder: {{ shared_folder_uid }}"
+      - "Protected task output: {{ demo_protect_sensitive_tasks | default(false) | bool }}"
+      - "Only synthetic canaries are used for record values."
