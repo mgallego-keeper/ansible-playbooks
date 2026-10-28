@@ -1,0 +1,47 @@
+---
+# net_check.yml: show which Keeper hosts this AAP job can reach, and what each answers. No credentials, no vault data.
+# Run it as a job template (any execution environment with the ansible.builtin collection, no credential needed).
+# A normal Keeper host answers with an HTTP status (200 or 404 for the web root). A load balancer that blocks the
+# caller answers 403 "Forbidden" with "awselb/2.0" in the body.
+- name: "Which Keeper hosts can this job reach"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    net_hosts:
+      - qa.keepersecurity.com
+      - qa.keepersecurity.ca
+      - qa.keepersecurity.eu
+      - keepersecurity.com
+      - keepersecurity.ca
+      - keepersecurity.eu
+  tasks:
+    - name: Ask each host for its web root
+      uri:
+        url: "https://{{ item }}/"
+        method: GET
+        status_code: [100, 101, 200, 201, 202, 203, 204, 301, 302, 303, 307, 308, 400, 401, 403, 404, 405, 429, 500, 502, 503]
+        return_content: false
+        timeout: 20
+      loop: "{{ net_hosts }}"
+      register: net_answers
+      failed_when: false
+
+    - name: Ask each host's API endpoint (the SDK posts here)
+      uri:
+        url: "https://{{ item }}/api/rest/sm/v1/get_secret"
+        method: POST
+        body: "{}"
+        status_code: [100, 101, 200, 201, 202, 203, 204, 301, 302, 303, 307, 308, 400, 401, 403, 404, 405, 429, 500, 502, 503]
+        return_content: false
+        timeout: 20
+      loop: "{{ net_hosts }}"
+      register: net_api
+      failed_when: false
+
+    - name: Show the answers
+      debug:
+        msg: "{{ item.0 }}: web root {{ item.1.status | default(item.1.msg | default('no answer')) }} | API endpoint {{ item.2.status | default(item.2.msg | default('no answer')) }}"
+      loop: "{{ net_hosts | zip(net_answers.results, net_api.results) | list }}"
+      loop_control:
+        label: "{{ item.0 }}"
