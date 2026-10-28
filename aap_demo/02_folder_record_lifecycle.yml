@@ -1,0 +1,317 @@
+---
+- name: Exercise folder and record CRUD against the QA vault
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    demo_scenario: lifecycle
+  vars_files:
+    - vars/fixtures.yml
+
+  tasks:
+    - name: Validate the demo configuration
+      ansible.builtin.import_tasks: tasks/common.yml
+
+    - name: Exercise the lifecycle with cleanup even after a failure
+      block:
+        - name: Create the scenario folder
+          ansible.builtin.import_tasks: tasks/setup.yml
+
+        - name: Create the first nested folder
+          keepersecurity.keeper_secrets_manager.keeper_create_folder:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            subfolder_uid: "{{ demo_created_root.folder_uid }}"
+            folder_name: Databases
+          register: demo_parent
+
+        - name: Repeat creation under the same parent
+          keepersecurity.keeper_secrets_manager.keeper_create_folder:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            subfolder_uid: "{{ demo_created_root.folder_uid }}"
+            folder_name: Databases
+          register: demo_parent_again
+
+        - name: Verify folder creation idempotence
+          ansible.builtin.assert:
+            that:
+              - demo_parent_again is not changed
+              - demo_parent_again.folder_uid == demo_parent.folder_uid
+            quiet: true
+
+        - name: Create a deeper nested folder
+          keepersecurity.keeper_secrets_manager.keeper_create_folder:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            subfolder_uid: "{{ demo_parent.folder_uid }}"
+            folder_name: Staging
+          register: demo_child
+
+        - name: Resolve the nested folder by its path
+          keepersecurity.keeper_secrets_manager.keeper_get_folder:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            folder_path:
+              - "{{ demo_root_name }}"
+              - Databases
+              - Staging
+          register: demo_by_path
+
+        - name: Verify the resolved folder metadata
+          ansible.builtin.assert:
+            that:
+              - demo_by_path.folder_uid == demo_child.folder_uid
+              - demo_by_path.parent_uid == demo_parent.folder_uid
+              - demo_by_path.shared_folder_uid == shared_folder_uid
+            quiet: true
+
+        - name: Read all descendants of the scenario folder
+          keepersecurity.keeper_secrets_manager.keeper_get_folder:
+            subfolder_uid: "{{ demo_created_root.folder_uid }}"
+            include_subfolders: true
+          register: demo_tree
+
+        - name: Verify descendant traversal at both depths
+          ansible.builtin.assert:
+            that:
+              - demo_parent.folder_uid in (demo_tree.subfolders | map(attribute='folder_uid') | list)
+              - demo_child.folder_uid in (demo_tree.subfolders | map(attribute='folder_uid') | list)
+            quiet: true
+
+        - name: Create a record using the existing shared-folder-root interface
+          keepersecurity.keeper_secrets_manager.keeper_create:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            record_type: login
+            title: "AAP root compatibility {{ demo_run_id }}"
+            fields:
+              - type: login
+                value: qa-root@example.invalid
+          register: demo_root_record
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Show the root compatibility record UID for Keeper inspection
+          ansible.builtin.debug:
+            msg: "Root compatibility record: {{ demo_root_record.record_uid }}"
+
+        - name: Remove the root compatibility record
+          keepersecurity.keeper_secrets_manager.keeper_remove:
+            uid: "{{ demo_root_record.record_uid }}"
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Remember successful root-record cleanup
+          ansible.builtin.set_fact:
+            demo_root_record_removed: true
+
+        - name: Create a record in the deeper subfolder
+          keepersecurity.keeper_secrets_manager.keeper_create:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            subfolder_uid: "{{ demo_child.folder_uid }}"
+            record_type: login
+            title: "AAP nested login {{ demo_run_id }}"
+            notes: "{{ demo_notes }}"
+            fields:
+              - type: login
+                value: qa-user@example.invalid
+              - type: password
+                value: "{{ demo_password }}"
+            custom_fields:
+              - type: text
+                label: Demo custom field
+                value: "{{ demo_custom_value }}"
+          register: demo_record
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Read the password through Keeper notation
+          keepersecurity.keeper_secrets_manager.keeper_get:
+            notation: "{{ demo_record.record_uid }}/field/password"
+          register: demo_read
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Read the custom field
+          keepersecurity.keeper_secrets_manager.keeper_get:
+            uid: "{{ demo_record.record_uid }}"
+            custom_field: Demo custom field
+          register: demo_custom_read
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Verify exact fixture values and the fully qualified lookup
+          ansible.builtin.assert:
+            that:
+              - demo_read.value == demo_password
+              - demo_custom_read.value == demo_custom_value
+              - >-
+                lookup('keepersecurity.keeper_secrets_manager.keeper',
+                uid=demo_record.record_uid, field='password') == demo_password
+            quiet: true
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Update the password
+          keepersecurity.keeper_secrets_manager.keeper_set:
+            uid: "{{ demo_record.record_uid }}"
+            field: password
+            value: "{{ demo_updated_password }}"
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Update the record notes
+          keepersecurity.keeper_secrets_manager.keeper_set:
+            uid: "{{ demo_record.record_uid }}"
+            notes: true
+            value: "{{ demo_updated_notes }}"
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Read the updated password without a registered cache
+          keepersecurity.keeper_secrets_manager.keeper_get:
+            uid: "{{ demo_record.record_uid }}"
+            field: password
+          register: demo_updated_read
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Read the updated notes
+          keepersecurity.keeper_secrets_manager.keeper_get:
+            uid: "{{ demo_record.record_uid }}"
+            notes: true
+          register: demo_notes_read
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Verify persisted updates
+          ansible.builtin.assert:
+            that:
+              - demo_updated_read.value == demo_updated_password
+              - demo_notes_read.value == demo_updated_notes
+            quiet: true
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Rename the nested folder
+          keepersecurity.keeper_secrets_manager.keeper_update_folder:
+            folder_uid: "{{ demo_child.folder_uid }}"
+            new_folder_name: Production
+          register: demo_renamed
+
+        - name: Repeat the rename
+          keepersecurity.keeper_secrets_manager.keeper_update_folder:
+            folder_uid: "{{ demo_child.folder_uid }}"
+            new_folder_name: Production
+          register: demo_renamed_again
+
+        - name: Look up the renamed folder and its descendants
+          keepersecurity.keeper_secrets_manager.keeper_get_folder:
+            subfolder_uid: "{{ demo_created_root.folder_uid }}"
+            folder_path: Databases/Production
+            include_subfolders: true
+          register: demo_after_rename
+
+        - name: Verify rename idempotence and stable identity
+          ansible.builtin.assert:
+            that:
+              - demo_renamed_again is not changed
+              - demo_after_rename.folder_uid == demo_child.folder_uid
+              - demo_renamed.folder_name == 'Production'
+            quiet: true
+
+        - name: Attempt nonempty deletion without force
+          keepersecurity.keeper_secrets_manager.keeper_delete_folder:
+            folder_uid: "{{ demo_parent.folder_uid }}"
+          register: demo_refused_delete
+          ignore_errors: true
+
+        - name: Require the specific nonempty-folder failure
+          ansible.builtin.assert:
+            that:
+              - demo_refused_delete is failed
+              - "'is not empty' in demo_refused_delete.msg"
+            quiet: true
+
+        - name: Remove the nested record
+          keepersecurity.keeper_secrets_manager.keeper_remove:
+            uid: "{{ demo_record.record_uid }}"
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Try reading the removed record
+          keepersecurity.keeper_secrets_manager.keeper_get:
+            uid: "{{ demo_record.record_uid }}"
+            field: login
+          register: demo_removed_read
+          ignore_errors: true
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Require the record-not-found result rather than any failure
+          ansible.builtin.assert:
+            that:
+              - demo_removed_read is failed
+              - "'record uid(s) could not be found' in demo_removed_read.msg"
+              - demo_record.record_uid in demo_removed_read.msg
+            quiet: true
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Delete the now-empty nested folder
+          keepersecurity.keeper_secrets_manager.keeper_delete_folder:
+            folder_uid: "{{ demo_child.folder_uid }}"
+          register: demo_deleted
+
+        - name: Repeat deletion by the same UID
+          keepersecurity.keeper_secrets_manager.keeper_delete_folder:
+            folder_uid: "{{ demo_child.folder_uid }}"
+          register: demo_deleted_again
+
+        - name: Verify deletion and its idempotent repeat
+          ansible.builtin.assert:
+            that:
+              - demo_deleted is changed
+              - demo_deleted_again is not changed
+              - demo_deleted_again.folder_name == none
+            quiet: true
+
+        - name: Create a descendant for a forced-deletion test
+          keepersecurity.keeper_secrets_manager.keeper_create_folder:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            subfolder_uid: "{{ demo_parent.folder_uid }}"
+            folder_name: Force deletion fixture
+          register: demo_force_child
+
+        - name: Put a disposable record inside that descendant
+          keepersecurity.keeper_secrets_manager.keeper_create:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            subfolder_uid: "{{ demo_force_child.folder_uid }}"
+            record_type: login
+            title: "AAP force deletion {{ demo_run_id }}"
+            fields:
+              - type: login
+                value: force-delete@example.invalid
+          register: demo_force_record
+
+        - name: Explicitly delete the parent and its remaining contents
+          keepersecurity.keeper_secrets_manager.keeper_delete_folder:
+            folder_uid: "{{ demo_parent.folder_uid }}"
+            force_deletion: true
+          register: demo_forced_delete
+
+        - name: Check that the descendant folder no longer exists
+          keepersecurity.keeper_secrets_manager.keeper_get_folder:
+            subfolder_uid: "{{ demo_force_child.folder_uid }}"
+          register: demo_force_child_after
+          ignore_errors: true
+
+        - name: Check that its record was deleted too
+          keepersecurity.keeper_secrets_manager.keeper_get:
+            uid: "{{ demo_force_record.record_uid }}"
+            field: login
+          register: demo_force_record_after
+          ignore_errors: true
+
+        - name: Verify actual recursive forced deletion
+          ansible.builtin.assert:
+            that:
+              - demo_forced_delete is changed
+              - demo_force_child_after is failed
+              - "'was not found' in demo_force_child_after.msg"
+              - demo_force_record_after is failed
+              - "'record uid(s) could not be found' in demo_force_record_after.msg"
+              - demo_force_record.record_uid in demo_force_record_after.msg
+            quiet: true
+
+        - name: Finish the lifecycle test
+          ansible.builtin.debug:
+            msg: >-
+              Folder and record lifecycle assertions passed. localhost is the
+              execution-environment container. Use the managed-host playbook
+              separately to test an actual inventory host.
+      always:
+        - name: Clean up this scenario's fixtures
+          ansible.builtin.import_tasks: tasks/cleanup.yml

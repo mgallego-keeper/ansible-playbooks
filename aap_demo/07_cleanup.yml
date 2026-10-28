@@ -1,0 +1,69 @@
+---
+- name: Remove an explicitly selected retained QA demo folder
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    demo_scenario: manual-cleanup
+
+  tasks:
+    - name: Validate the QA scope
+      ansible.builtin.import_tasks: tasks/common.yml
+
+    - name: Require the exact fixture identity from the earlier job
+      ansible.builtin.assert:
+        that:
+          - demo_cleanup_folder_uid is defined
+          - demo_cleanup_root_name is defined
+          - demo_cleanup_root_name is match('^AAP-Demo-')
+          - demo_cleanup_folder_uid != shared_folder_uid
+        fail_msg: "Supply the earlier job's cleanup folder UID and exact AAP-Demo root name."
+        quiet: true
+
+    - name: Verify access to the selected QA shared folder first
+      keepersecurity.keeper_secrets_manager.keeper_get_folder:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+
+    - name: Check the folder's current identity and QA ancestry
+      keepersecurity.keeper_secrets_manager.keeper_get_folder:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        subfolder_uid: "{{ demo_cleanup_folder_uid }}"
+      register: demo_cleanup_lookup
+      ignore_errors: true
+
+    - name: Accept only the intended folder or a specific not-found response
+      ansible.builtin.assert:
+        that:
+          - >-
+            (demo_cleanup_lookup is not failed and
+             demo_cleanup_lookup.folder_name == demo_cleanup_root_name and
+             demo_cleanup_lookup.shared_folder_uid == shared_folder_uid and
+             demo_cleanup_lookup.parent_uid == shared_folder_uid) or
+            (demo_cleanup_lookup is failed and
+             'was not found, or it is not shared' in demo_cleanup_lookup.msg)
+        quiet: true
+
+    - name: Delete the verified folder and its remaining QA fixtures
+      keepersecurity.keeper_secrets_manager.keeper_delete_folder:
+        folder_uid: "{{ demo_cleanup_folder_uid }}"
+        force_deletion: true
+      when: demo_cleanup_lookup is not failed
+
+    - name: Confirm idempotent deletion by UID
+      keepersecurity.keeper_secrets_manager.keeper_delete_folder:
+        folder_uid: "{{ demo_cleanup_folder_uid }}"
+        force_deletion: true
+      register: demo_cleanup_repeat
+      when: demo_cleanup_lookup is not failed
+
+    - name: Require that no folder remains to delete
+      ansible.builtin.assert:
+        that:
+          - demo_cleanup_repeat is not changed
+        quiet: true
+      when: demo_cleanup_lookup is not failed
+
+    - name: Report an already missing fixture without sending a delete
+      ansible.builtin.debug:
+        msg: "The selected fixture is already absent from this QA application."
+      when: demo_cleanup_lookup is failed

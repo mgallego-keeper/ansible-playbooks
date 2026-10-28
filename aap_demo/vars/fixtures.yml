@@ -1,0 +1,12 @@
+---
+# These are synthetic QA values, not credentials.
+demo_root_name: "AAP-Demo-{{ demo_scenario }}-{{ demo_run_id }}"
+demo_password: "QA_CANARY_PASSWORD_{{ demo_run_id }}!"
+demo_updated_password: "QA_CANARY_UPDATED_PASSWORD_{{ demo_run_id }}!"
+demo_notes: "QA_CANARY_NOTES_{{ demo_run_id }}"
+demo_updated_notes: "QA_CANARY_UPDATED_NOTES_{{ demo_run_id }}"
+demo_custom_value: "QA_CANARY_CUSTOM_{{ demo_run_id }}"
+demo_folder_canary: "QA_CANARY_FOLDER_{{ demo_run_id }}"
+demo_error_canary: "QA_CANARY_ERROR_{{ demo_run_id }}"
+demo_file_content: "QA_CANARY_FILE_{{ demo_run_id }}"
+keeper_record_cache_secret: "QA_CANARY_CACHE_KEY_{{ demo_run_id }}"

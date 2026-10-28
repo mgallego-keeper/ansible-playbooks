@@ -1,0 +1,193 @@
+---
+- name: Verify folder validation, failure handling, and check mode
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    demo_scenario: validation
+  vars_files:
+    - vars/fixtures.yml
+
+  tasks:
+    - name: Validate the demo configuration
+      ansible.builtin.import_tasks: tasks/common.yml
+
+    - name: Exercise expected failures without accepting unrelated failures
+      block:
+        - name: Create the scenario folder
+          ansible.builtin.import_tasks: tasks/setup.yml
+
+        - name: Create a folder with a slash in its literal name
+          keepersecurity.keeper_secrets_manager.keeper_create_folder:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            subfolder_uid: "{{ demo_created_root.folder_uid }}"
+            folder_name: Prod/EU
+          register: demo_slash_folder
+
+        - name: Resolve the literal slash name with a list path
+          keepersecurity.keeper_secrets_manager.keeper_get_folder:
+            subfolder_uid: "{{ demo_created_root.folder_uid }}"
+            folder_path:
+              - Prod/EU
+          register: demo_slash_lookup
+
+        - name: Confirm that omitting the name returns the start folder itself
+          keepersecurity.keeper_secrets_manager.keeper_get_folder:
+            subfolder_uid: "{{ demo_slash_folder.folder_uid }}"
+          register: demo_start_lookup
+
+        - name: Verify both lookup forms
+          ansible.builtin.assert:
+            that:
+              - demo_slash_lookup.folder_uid == demo_slash_folder.folder_uid
+              - demo_start_lookup.folder_uid == demo_slash_folder.folder_uid
+            quiet: true
+
+        - name: Reject misspelled lookup options
+          keepersecurity.keeper_secrets_manager.keeper_get_folder:
+            subfolder_uid: "{{ demo_created_root.folder_uid }}"
+            folder_nam: Prod/EU
+          register: demo_typo
+          ignore_errors: true
+
+        - name: Reject an explicitly null name
+          keepersecurity.keeper_secrets_manager.keeper_get_folder:
+            subfolder_uid: "{{ demo_created_root.folder_uid }}"
+            folder_name: null
+          register: demo_null
+          ignore_errors: true
+
+        - name: Reject a numeric name rather than silently converting it
+          keepersecurity.keeper_secrets_manager.keeper_get_folder:
+            subfolder_uid: "{{ demo_created_root.folder_uid }}"
+            folder_name: 7
+          register: demo_numeric
+          ignore_errors: true
+
+        - name: Reject mutually exclusive lookup options
+          keepersecurity.keeper_secrets_manager.keeper_get_folder:
+            subfolder_uid: "{{ demo_created_root.folder_uid }}"
+            folder_name: Prod/EU
+            folder_path:
+              - Prod/EU
+          register: demo_exclusive
+          ignore_errors: true
+
+        - name: Verify the specific argument failures
+          ansible.builtin.assert:
+            that:
+              - demo_typo is failed
+              - "'Unsupported parameters' in demo_typo.msg"
+              - demo_null is failed
+              - "'null' in demo_null.msg"
+              - demo_numeric is failed
+              - "'string' in demo_numeric.msg"
+              - demo_exclusive is failed
+              - "'mutually exclusive' in demo_exclusive.msg"
+            quiet: true
+
+        - name: Reject a padded rename
+          keepersecurity.keeper_secrets_manager.keeper_update_folder:
+            folder_uid: "{{ demo_slash_folder.folder_uid }}"
+            new_folder_name: " Padded "
+          register: demo_padded
+          ignore_errors: true
+
+        - name: Reject the obsolete record-creation parameter
+          keepersecurity.keeper_secrets_manager.keeper_create:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            folder_uid: "{{ demo_slash_folder.folder_uid }}"
+            record_type: login
+            title: This record must not be created
+          register: demo_old_key
+          ignore_errors: true
+
+        - name: Reject force as a direct folder-delete option
+          keepersecurity.keeper_secrets_manager.keeper_delete_folder:
+            folder_uid: "{{ demo_created_root.folder_uid }}"
+            force: true
+          register: demo_force_alias
+          ignore_errors: true
+
+        - name: Verify parameter and rename failures
+          ansible.builtin.assert:
+            that:
+              - demo_padded is failed
+              - "'leading or trailing whitespace' in demo_padded.msg"
+              - demo_old_key is failed
+              - "'renamed to subfolder_uid' in demo_old_key.msg"
+              - demo_force_alias is failed
+              - "'Unsupported parameters' in demo_force_alias.msg"
+            quiet: true
+
+        - name: Predict a rename without mutating the folder
+          keepersecurity.keeper_secrets_manager.keeper_update_folder:
+            folder_uid: "{{ demo_slash_folder.folder_uid }}"
+            new_folder_name: Preview only
+          check_mode: true
+          register: demo_preview_rename
+
+        - name: Predict empty-folder deletion without deleting it
+          keepersecurity.keeper_secrets_manager.keeper_delete_folder:
+            folder_uid: "{{ demo_slash_folder.folder_uid }}"
+          check_mode: true
+          register: demo_preview_delete
+
+        - name: Read the real folder after the check-mode tasks
+          keepersecurity.keeper_secrets_manager.keeper_get_folder:
+            subfolder_uid: "{{ demo_slash_folder.folder_uid }}"
+          register: demo_after_preview
+
+        - name: Verify predictions and unchanged vault state
+          ansible.builtin.assert:
+            that:
+              - demo_preview_rename is changed
+              - demo_preview_rename.folder_name == 'Preview only'
+              - demo_preview_delete is changed
+              - demo_after_preview.folder_name == 'Prod/EU'
+              - demo_after_preview.folder_uid == demo_slash_folder.folder_uid
+            quiet: true
+
+        - name: Verify that a copy-related group default cannot force deletion
+          module_defaults:
+            group/keepersecurity.keeper_secrets_manager.keeper_secrets_manager:
+              shared_folder_uid: "{{ shared_folder_uid }}"
+              force: true
+          block:
+            - name: Attempt nonempty deletion with the inherited foreign option
+              keepersecurity.keeper_secrets_manager.keeper_delete_folder:
+                folder_uid: "{{ demo_created_root.folder_uid }}"
+              register: demo_group_delete
+              ignore_errors: true
+
+        - name: Require nonempty protection despite the group default
+          ansible.builtin.assert:
+            that:
+              - demo_group_delete is failed
+              - "'is not empty' in demo_group_delete.msg"
+            quiet: true
+
+        - name: Demonstrate normal block and rescue handling
+          block:
+            - name: Look up a deliberately missing folder
+              keepersecurity.keeper_secrets_manager.keeper_get_folder:
+                subfolder_uid: "{{ demo_created_root.folder_uid }}"
+                folder_name: Missing fixture
+          rescue:
+            - name: Accept only the expected missing-folder error
+              ansible.builtin.assert:
+                that:
+                  - "'No folder named' in ansible_failed_result.msg"
+                quiet: true
+            - name: Remember that rescue handled the task failure
+              ansible.builtin.set_fact:
+                demo_rescue_reached: true
+
+        - name: Verify that rescue actually ran
+          ansible.builtin.assert:
+            that:
+              - demo_rescue_reached | default(false) | bool
+            quiet: true
+      always:
+        - name: Clean up this scenario's fixtures
+          ansible.builtin.import_tasks: tasks/cleanup.yml

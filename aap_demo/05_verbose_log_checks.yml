@@ -1,0 +1,183 @@
+---
+- name: Inspect verbose success, failure, and internal folder logging
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    demo_scenario: logging
+  vars_files:
+    - vars/fixtures.yml
+
+  tasks:
+    - name: Validate the demo configuration
+      ansible.builtin.import_tasks: tasks/common.yml
+
+    - name: Exercise known canaries without explicitly debugging secret values
+      block:
+        - name: Create the scenario folder
+          ansible.builtin.import_tasks: tasks/setup.yml
+
+        - name: Create a login containing the synthetic record canaries
+          keepersecurity.keeper_secrets_manager.keeper_create:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            subfolder_uid: "{{ demo_created_root.folder_uid }}"
+            record_type: login
+            title: "AAP logging fixture {{ demo_run_id }}"
+            notes: "{{ demo_notes }}"
+            fields:
+              - type: login
+                value: logging-user@example.invalid
+              - type: password
+                value: "{{ demo_password }}"
+            custom_fields:
+              - type: text
+                label: Demo custom field
+                value: "{{ demo_custom_value }}"
+          register: demo_log_record
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Retrieve a password normally
+          keepersecurity.keeper_secrets_manager.keeper_get:
+            uid: "{{ demo_log_record.record_uid }}"
+            field: password
+          register: demo_log_password
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Retrieve notes normally
+          keepersecurity.keeper_secrets_manager.keeper_get:
+            uid: "{{ demo_log_record.record_uid }}"
+            notes: true
+          register: demo_log_notes
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Retrieve a normalized record dictionary
+          keepersecurity.keeper_secrets_manager.keeper_get_record:
+            uid: "{{ demo_log_record.record_uid }}"
+            allow:
+              - password
+              - Demo_custom_field
+          register: demo_log_dictionary
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Verify the reads without a deliberate secret debug task
+          ansible.builtin.assert:
+            that:
+              - demo_log_password.value == demo_password
+              - demo_log_notes.value == demo_notes
+              - demo_log_dictionary.record.password[0] == demo_password
+              - demo_log_dictionary.record.Demo_custom_field[0] == demo_custom_value
+              - >-
+                lookup('keepersecurity.keeper_secrets_manager.keeper',
+                uid=demo_log_record.record_uid, field='password') == demo_password
+            quiet: true
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Create a temporary directory inside the execution environment
+          ansible.builtin.tempfile:
+            state: directory
+            prefix: ksm_aap_logging_
+          register: demo_log_directory
+
+        - name: Copy a secret field without enabling a diff
+          keepersecurity.keeper_secrets_manager.keeper_copy:
+            uid: "{{ demo_log_record.record_uid }}"
+            field: password
+            dest: "{{ demo_log_directory.path }}/password.txt"
+            mode: "0600"
+          diff: false
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Verify the copied field through a base64-returning task
+          ansible.builtin.slurp:
+            src: "{{ demo_log_directory.path }}/password.txt"
+          register: demo_log_file
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Check the copied bytes
+          ansible.builtin.assert:
+            that:
+              - demo_log_file.content | b64decode == demo_password
+            quiet: true
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Create a folder whose name is a logging canary
+          keepersecurity.keeper_secrets_manager.keeper_create_folder:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            subfolder_uid: "{{ demo_created_root.folder_uid }}"
+            folder_name: "{{ demo_folder_canary }}"
+          register: demo_log_folder
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Exercise internal verbose output on an idempotent rename
+          keepersecurity.keeper_secrets_manager.keeper_update_folder:
+            folder_uid: "{{ demo_log_folder.folder_uid }}"
+            new_folder_name: "{{ demo_folder_canary }}"
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Create a sibling for the duplicate-name warning path
+          keepersecurity.keeper_secrets_manager.keeper_create_folder:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            subfolder_uid: "{{ demo_created_root.folder_uid }}"
+            folder_name: Warning sibling
+          register: demo_warning_sibling
+
+        - name: Exercise internal warning output on a duplicate-name rename
+          keepersecurity.keeper_secrets_manager.keeper_update_folder:
+            folder_uid: "{{ demo_warning_sibling.folder_uid }}"
+            new_folder_name: "{{ demo_folder_canary }}"
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Require an ambiguous-name lookup to fail rather than pick a folder
+          keepersecurity.keeper_secrets_manager.keeper_get_folder:
+            subfolder_uid: "{{ demo_created_root.folder_uid }}"
+            folder_name: "{{ demo_folder_canary }}"
+          register: demo_log_ambiguity
+          ignore_errors: true
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Verify the specific ambiguity failure
+          ansible.builtin.assert:
+            that:
+              - demo_log_ambiguity is failed
+              - "'folders named' in demo_log_ambiguity.msg"
+            quiet: true
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Exercise an error message containing a synthetic canary
+          keepersecurity.keeper_secrets_manager.keeper_get_folder:
+            subfolder_uid: "{{ demo_created_root.folder_uid }}"
+            folder_name: "{{ demo_error_canary }}"
+          register: demo_log_failure
+          ignore_errors: true
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Verify that the intended failure occurred
+          ansible.builtin.assert:
+            that:
+              - demo_log_failure is failed
+              - "'No folder named' in demo_log_failure.msg"
+            quiet: true
+          no_log: "{{ demo_protect_sensitive_tasks | default(false) | bool }}"
+
+        - name: Emit an optional and explicitly labeled scanner positive control
+          ansible.builtin.debug:
+            msg: "QA_LOG_SCAN_POSITIVE_CONTROL"
+          when: demo_emit_positive_control | default(false) | bool
+
+        - name: Explain how to interpret the log evidence
+          ansible.builtin.debug:
+            msg: >-
+              Scan this job's stdout and complete job-event export. Ordinary
+              unprotected arguments/results can expose canaries by design.
+              Investigate credential exposure and internal logging separately.
+              A protected run is a test, not an assumption that no_log hides
+              every Display or SDK log message.
+      always:
+        - name: Remove the temporary execution-environment directory
+          ansible.builtin.file:
+            path: "{{ demo_log_directory.path }}"
+            state: absent
+          when: demo_log_directory.path is defined
+
+        - name: Clean up this scenario's vault fixtures
+          ansible.builtin.import_tasks: tasks/cleanup.yml
