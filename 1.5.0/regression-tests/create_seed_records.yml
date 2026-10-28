@@ -1,0 +1,242 @@
+---
+# Creates the records and folders that the acceptance and regression playbooks read, in the shared folder you name.
+#
+# Run it once per vault, and again whenever someone deletes a fixture. It is idempotent: it looks up each record by
+# title and each folder by name, creates only what is missing, and never deletes anything.
+#
+#   Locally:    ansible-playbook create_seed_records.yml -e @vars.json
+#   In AAP:     a job template with this playbook and the KSM credential (it injects keeper_config). The playbook decodes
+#               keeper_config into a private file when config_file is not set, and deletes the file at the end.
+#
+# Needs: shared_folder_uid, shared_folder_name, and ksm1673_shared_b (a SECOND shared folder that the application can
+# read; create and share it in the vault by hand, because the API cannot create shared folders), plus config_file
+# (local run) or keeper_config (AAP). The keepersecurity.keeper_secrets_manager collection must be installed. At the end
+# it prints the values to set as variables for the playbooks that read the fixtures (R38 to R44).
+#
+# Records are synthetic. The attachment is generated here (see seed_helper.py), so no binary is committed.
+- name: Seed the fixtures that the acceptance and regression playbooks need
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    helper: "{{ playbook_dir }}/seed_helper.py"
+    attachment_name: "qa-attachment.jpeg"
+    # Folder names are fixed. R43 and R44 look them up by name, so do not rename them.
+    root_name: "KSM-1445 Root Folder Test"
+    nested_name: "KSM-1445 Nested Folder Test"
+    databases_name: "KSM-1478 Databases"
+    production_name: "KSM-1478 Production"
+    hidden_name: "KSM-1674 Hidden Folder"
+    duplicate_name: "KSM-1479 Rename Target (Renamed)"
+    duplicate_source_name: "KSM-1479 Rename Target (Seed Duplicate)"
+    seed_records:
+      - key: login
+        title: "QA Test Record - Login"
+        fields:
+          - {type: login, value: "qa_test_user"}
+          - {type: password, value: "qa_test_P@ssw0rd!"}
+          - {type: url, value: "https://qa.example.com"}
+        custom:
+          - {type: text, label: "Environment", value: "qa-acceptance"}
+          - {type: text, label: "Team", value: "QA Automation"}
+        notes: "This is a QA seed record for acceptance testing. Do not delete."
+      - key: notes
+        title: "QA Test Record - With Notes"
+        fields:
+          - {type: login, value: "notes_user"}
+          - {type: password, value: "notes_P@ss!"}
+        notes: "These are the seed notes for QA acceptance testing. Do not delete."
+      - key: password
+        title: "KSM QA Password Fixture"
+        fields:
+          - {type: login, value: "ksm_qa_password"}
+          - {type: password, value: "KsmQa-Password-Fixture-1"}
+      - key: short_secret
+        title: "KSM-1643 short secret fixture"
+        fields:
+          - {type: login, value: "record"}
+          - {type: password, value: "~#q"}
+      - key: attachment
+        title: "KSM QA Attachment Fixture"
+        fields:
+          - {type: login, value: "ksm_qa_attachment"}
+          - {type: password, value: "KsmQa-Attachment-Fixture-1"}
+        attachment: "{{ attachment_name }}"
+
+  tasks:
+    - name: Make a private directory for the KSM configuration
+      tempfile:
+        state: directory
+        prefix: ksm_seed_
+      register: seed_dir
+      when: config_file is not defined and keeper_config is defined
+
+    - name: Write the KSM configuration to a private file
+      copy:
+        dest: "{{ seed_dir.path }}/ksm-config.json"
+        mode: "0600"
+        content: "{{ keeper_config | b64decode }}"
+      no_log: true
+      when: seed_dir is not skipped
+
+    - name: Use the decoded file as config_file
+      set_fact:
+        config_file: "{{ seed_dir.path }}/ksm-config.json"
+        keeper_config_file: "{{ seed_dir.path }}/ksm-config.json"
+      when: seed_dir is not skipped
+
+    - name: Check the required variables
+      assert:
+        that:
+          - config_file is defined
+          - shared_folder_uid is defined
+          - ksm1673_shared_b is defined
+          - "'REPLACE' not in ksm1673_shared_b"
+        fail_msg: >-
+          Set shared_folder_uid and ksm1673_shared_b first, and attach the KSM credential (or set config_file). ksm1673_shared_b is the UID
+          of a second shared folder that the application can read. Create it in the vault, share it to the
+          application, then copy its UID. The API cannot create shared folders.
+
+    - name: Read the shared folders
+      keeper_get_folder:
+        shared_folder_uid: "{{ item }}"
+      loop: ["{{ shared_folder_uid }}", "{{ ksm1673_shared_b }}"]
+      register: shared_roots
+      ignore_errors: true
+
+    - name: Stop when a shared folder is not readable
+      assert:
+        that: shared_roots.results | selectattr('failed') | list | length == 0
+        fail_msg: >-
+          The application cannot read shared_folder_uid or ksm1673_shared_b. Share both folders to the application with
+          edit rights, then run the seed again. Details: {{ shared_roots.results | map(attribute='msg', default='ok') | list }}
+
+    - name: Create or find each record
+      command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - "{{ helper }}"
+          - "{{ config_file }}"
+          - "{{ shared_folder_uid }}"
+          - "{{ item | to_json }}"
+      environment:
+        KSM_CONFIG_SKIP_MODE_WARNING: "TRUE"
+      loop: "{{ seed_records }}"
+      loop_control: {label: "{{ item.title }}"}
+      register: ensured
+      changed_when: false
+
+    - name: Collect the record UIDs
+      set_fact:
+        seed: "{{ seed | default({}) | combine({item.item.key: (item.stdout | from_json)}) }}"
+      loop: "{{ ensured.results }}"
+      loop_control: {label: "{{ item.item.key }}"}
+
+    - name: Create the root folder
+      keeper_create_folder:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        folder_name: "{{ root_name }}"
+      register: root
+
+    - name: Create the nested folder
+      keeper_create_folder:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        subfolder_uid: "{{ root.folder_uid }}"
+        folder_name: "{{ nested_name }}"
+      register: nested
+
+    - name: Create the databases folder
+      keeper_create_folder:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        folder_name: "{{ databases_name }}"
+      register: databases
+
+    - name: Create the production folder
+      keeper_create_folder:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        subfolder_uid: "{{ databases.folder_uid }}"
+        folder_name: "{{ production_name }}"
+      register: production
+
+    - name: Create the hidden folder
+      keeper_create_folder:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        folder_name: "{{ hidden_name }}"
+      register: hidden
+
+    - name: Create the first folder of the duplicate-name pair
+      keeper_create_folder:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        folder_name: "{{ duplicate_name }}"
+      register: duplicate_first
+
+    - name: Check whether the duplicate pair already exists
+      keeper_get_folder:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        folder_name: "{{ duplicate_name }}"
+      register: duplicate_check
+      failed_when: false
+
+    - name: Create the second folder of the pair under another name
+      keeper_create_folder:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        folder_name: "{{ duplicate_source_name }}"
+      register: duplicate_second
+      when: "'Found ' not in (duplicate_check.msg | default(''))"
+
+    - name: Rename the second folder to the first name
+      keeper_update_folder:
+        folder_uid: "{{ duplicate_second.folder_uid }}"
+        new_folder_name: "{{ duplicate_name }}"
+      when: "'Found ' not in (duplicate_check.msg | default(''))"
+
+    - name: Confirm that at least two folders share the name
+      keeper_get_folder:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        folder_name: "{{ duplicate_name }}"
+      register: duplicate_final
+      failed_when: false
+
+    - name: Assert the duplicate pair
+      assert:
+        that:
+          - duplicate_final.msg | default('') is search('Found ([2-9]|[1-9][0-9]+) folders named')
+        fail_msg: "The duplicate pair is wrong. Expected 'Found 2 folders' (or more) but got: {{ duplicate_final.msg | default('a unique match') }}"
+
+    - name: Summary
+      debug:
+        msg: |
+          ============================================
+          SEED DONE ({{ ensured.results | selectattr('stdout', 'search', '"created": true') | list | length }} records created, the rest already existed)
+          ============================================
+          Set these as variables (job template Variables in AAP, or vars.json locally); keep the values you already have for the other keys:
+
+          "record_uid": "{{ seed.login.uid }}",
+          "record_title": "QA Test Record - Login",
+          "custom_field_label": "Environment",
+          "notes_record_uid": "{{ seed.notes.uid }}",
+          "record_uids": ["{{ seed.login.uid }}", "{{ seed.notes.uid }}"],
+          "record_titles": ["QA Test Record - Login", "QA Test Record - With Notes"],
+          "password_record_uid": "{{ seed.password.uid }}",
+          "short_secret_record_uid": "{{ seed.short_secret.uid }}",
+          "attachment_record_uid": "{{ seed.attachment.uid }}",
+          "attachment_file_name": "{{ attachment_name }}",
+          "shared_folder_name": "{{ shared_roots.results[0].folder_name }}",
+          "ksm1673_subfolder": "{{ root.folder_uid }}",
+          "ksm1673_deep_subfolder": "{{ nested.folder_uid }}",
+          "ksm1674_databases_uid": "{{ databases.folder_uid }}",
+          "ksm1674_production_uid": "{{ production.folder_uid }}",
+          "ksm1674_hidden_uid": "{{ hidden.folder_uid }}"
+
+          Not created by this playbook: ksm1673_shared_b (you supplied it) and, optionally,
+          non_editable_folder_uid / non_editable_record_uid.
+
+    - name: Remove the private directory
+      file:
+        path: "{{ seed_dir.path }}"
+        state: absent
+      when: seed_dir is not skipped

@@ -1,0 +1,169 @@
+---
+# R37.1: LIVE keeper_redact hides multiline secrets in every printed shape (KSM-1667).
+#
+# Before the fix a multiline key that keeper_get returned was masked as ONE string, but the same key printed as a list of lines
+# (a debug msg list, stdout_lines, stderr_lines) or as command output with its trailing newline trimmed showed every line in the
+# clear. After the fix a run of lines that equals a learned key is masked line by line, for LF and CRLF keys. Single-line secrets
+# stay masked and public text is untouched.
+#
+# What this does: kt_make_secrets.py makes a single-line secret plus two fake PEM keys (LF and CRLF line ends) with random bodies.
+# keeper_create stores them in a throwaway login record (password + custom fields pem_lf, pem_crlf). kt_inner.yml then runs as its
+# own ansible-playbook process with keeper_redact as stdout callback and -v: it reads the record with keeper_get (3 calls, paced),
+# and prints the values in 12 shapes (debug msg string, msg list, debug var, command/shell stdout, stdout_lines, stderr_lines,
+# mixed with public lines, ...). kt_check.py greps the captured console output (it never prints a secret) and the table below is
+# asserted. keeper_remove deletes the record in an always: section (retried) and a final keeper_get_record by UID must fail.
+#
+# Run with: -e config_file=<KSM config JSON> -e shared_folder_uid=<writable classic shared folder UID>
+# Optional: -e pace=25 (seconds between vault calls; QA US throttles with 429), -e strict=false (print the table, do not fail the
+# play; used to show a build from BEFORE the fix), KT_KEEP=<path> (env var; saves the captured console output for evidence),
+# -e ap_path=<full path of ansible-playbook> (only when it is not next to the interpreter, e.g. AWX / the Tower EE image:
+# /usr/local/bin/ansible-playbook; -e ap_dir=<dir> still works too).
+# KR_CALLBACK (env; defaults to the collection callback FQCN, use keeper_redact for a raw pip / source tree install).
+# Surfaces: Galaxy collection (collections: below, ANSIBLE_COLLECTIONS_PATH = the install dir), raw pip / source tree (plugin paths
+# in ansible.cfg, PYTHONPATH = the source tree, ANSIBLE_COLLECTIONS_PATH = an EMPTY dir), Tower EE image (see the EE notes in the report).
+- name: "R37.1: live multiline secrets are masked in every shape"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    pace: 5
+    strict: true
+    kt_callback: "{{ lookup('env', 'KR_CALLBACK') | default(('keeper_redact' if (surface | default('pip')) == 'pip' else 'keepersecurity.keeper_secrets_manager.keeper_redact'), true) }}"
+    py: "{{ ansible_playbook_python }}"
+    ap_dir: "{{ (ap_path | dirname) if ap_path is defined else ('/usr/local/bin' if (surface | default('pip')) in ['tower', 'awx'] else (ansible_playbook_python | dirname)) }}"
+
+  tasks:
+    - name: Make a scratch directory
+      tempfile: {state: directory, suffix: ksmv_r29_1}
+      register: kt_dir
+
+    - name: Generate the secrets
+      command: "{{ py }} {{ playbook_dir }}/kt_make_secrets.py {{ kt_dir.path }}/secrets.json"
+      register: kt_gen
+      changed_when: false
+
+    - name: Load the secrets
+      set_fact:
+        kt_sec: "{{ lookup('file', kt_dir.path ~ '/secrets.json') | from_json }}"
+        kt_created: []
+      no_log: true
+
+    - name: Run the scenario and always clean up
+      block:
+        - name: Prove which callback file loads (ansible-doc, no vault, no secret)
+          shell: >-
+            {{ ap_dir }}/ansible-doc -t callback -j {{ kt_callback }} | {{ py }} -c
+            "import sys,json; d=json.load(sys.stdin); k=list(d)[0]; print(d[k]['doc']['filename'])"
+          register: kt_which
+          changed_when: false
+
+        - name: Create the throwaway record
+          keeper_create:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            record_type: login
+            title: "KSMV-R37-{{ kt_sec.run }}"
+            fields:
+              - type: login
+                value: "kt_user"
+              - type: password
+                value: "{{ kt_sec.single }}"
+            custom_fields:
+              - type: text
+                label: pem_lf
+                value: "{{ kt_sec.pem_lf }}"
+              - type: text
+                label: pem_crlf
+                value: "{{ kt_sec.pem_crlf }}"
+          register: kt_rec
+          no_log: true
+          retries: 3
+          delay: 70
+          until: kt_rec is not failed
+
+        - name: Remember the record
+          set_fact:
+            kt_created: "{{ kt_created + [kt_rec.record_uid] }}"
+
+        - name: Pace
+          pause: {seconds: "{{ pace }}"}
+
+        - name: Run the inner playbook with keeper_redact as stdout callback and -v
+          shell: >-
+            {{ ap_dir }}/ansible-playbook {{ playbook_dir }}/kt_inner.yml -v
+            -e keeper_config_file={{ config_file | quote }} -e kt_uid={{ kt_rec.record_uid }} -e kt_dir={{ kt_dir.path }} -e kt_pace={{ pace }}
+            > {{ kt_dir.path }}/out.txt 2>&1
+          environment:
+            ANSIBLE_STDOUT_CALLBACK: "{{ kt_callback }}"
+            ANSIBLE_NOCOLOR: "1"
+            KSM_CONFIG_SKIP_MODE_WARNING: "TRUE"
+            ANSIBLE_INVENTORY_UNPARSED_FAILED: "False"
+            OBJC_DISABLE_INITIALIZE_FORK_SAFETY: "YES"
+            no_proxy: "*"
+          changed_when: false
+          failed_when: false
+
+        - name: Check the captured output
+          command: "{{ py }} {{ playbook_dir }}/kt_check.py {{ kt_dir.path }}/out.txt {{ kt_dir.path }}/secrets.json {{ kt_dir.path }}"
+          register: kt_check
+          changed_when: false
+          failed_when: false
+
+        - name: Keep a copy of the console output for evidence when KT_KEEP is set
+          copy: {src: "{{ kt_dir.path }}/out.txt", dest: "{{ lookup('env', 'KT_KEEP') }}", remote_src: true}
+          when: lookup('env', 'KT_KEEP') | length > 0
+
+        - name: Parse the result
+          set_fact:
+            kt_data: "{{ kt_check.stdout | from_json }}"
+
+        - name: Show the code under test and the table
+          debug:
+            msg: "{{ ['callback loaded from: ' ~ kt_which.stdout] + (kt_data.cases | map(attribute='result') | zip(kt_data.cases | map(attribute='case'), kt_data.cases | map(attribute='detail')) | map('join', ' | ') | list) + ['OBSERVATIONS (not asserted): ' ~ (kt_data.observations | to_json)] }}"
+
+        - name: Assert every case passed
+          assert:
+            that: kt_data.fails | int == 0
+            success_msg: "PASS [R37.1]: all {{ kt_data.cases | length }} cases passed"
+            fail_msg: "FAIL [R37.1]: {{ kt_data.fails }} of {{ kt_data.cases | length }} cases failed"
+          when: strict | bool
+      always:
+        - name: Remove the record (retried, QA throttles and a failed cleanup would leave it behind)
+          keeper_remove:
+            uid: "{{ item }}"
+          loop: "{{ kt_created }}"
+          register: kt_removed
+          retries: 3
+          delay: 70
+          until: kt_removed is not failed
+
+        - name: Pace
+          pause: {seconds: "{{ pace }}"}
+          when: kt_created | length > 0
+
+        - name: The record must be gone (reads only the login field, a harmless value)
+          keeper_get:
+            uid: "{{ item }}"
+            field: login
+          loop: "{{ kt_created }}"
+          register: kt_gone
+          ignore_errors: true
+
+        - name: Assert the cleanup
+          vars:
+            # ansible-core 2.16 (AWX / Tower EE) returns the failure of a looped keeper_get as one flat result without
+            # "results" when the module raises; newer cores return "results". Accept both shapes.
+            kt_gone_list: "{{ kt_gone.results if kt_gone.results is defined else [kt_gone] }}"
+          assert:
+            that:
+              - kt_gone_list | selectattr('failed', 'defined') | selectattr('failed') | list | length == kt_created | length
+              - kt_gone_list | map(attribute='msg', default='') | select('search', 'could not be found') | list | length == kt_created | length
+            success_msg: "PASS [R37.1-cleanup]: {{ kt_created | length }} record(s) removed, a read by UID now fails"
+            fail_msg: "FAIL [R37.1-cleanup]: a record can still be read"
+          when: kt_created | length > 0
+
+        - name: Remove the scratch directory (holds the throw-away secrets)
+          file: {path: "{{ kt_dir.path }}", state: absent}

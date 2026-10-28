@@ -1,0 +1,49 @@
+# R14.1: keeper_update_folder renames a folder, and renaming to the same name again is a
+# no-op (changed: false, no server call) (KSM-1479).
+- name: "R14.1: keeper_update_folder rename + idempotent re-rename"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    original_name: "R14-KSM-1479 Regression Folder"
+    renamed_name: "R14-KSM-1479 Regression Folder (Renamed)"
+
+  tasks:
+    - name: Create or reuse the regression folder
+      keeper_create_folder:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        folder_name: "{{ original_name }}"
+      register: fixture_folder
+
+    - name: Rename the folder
+      keeper_update_folder:
+        folder_uid: "{{ fixture_folder.folder_uid }}"
+        new_folder_name: "{{ renamed_name }}"
+      register: first_rename
+
+    - name: Assert the rename reports the correct before/after names
+      assert:
+        that:
+          - first_rename.folder_name == renamed_name
+        success_msg: "PASS [R14.1]: Renamed to '{{ first_rename.folder_name }}'"
+        fail_msg: "FAIL [R14.1]: {{ first_rename }}"
+
+    - name: Re-run the same rename
+      keeper_update_folder:
+        folder_uid: "{{ fixture_folder.folder_uid }}"
+        new_folder_name: "{{ renamed_name }}"
+      register: second_rename
+
+    - name: Assert the second run is a no-op
+      assert:
+        that:
+          - second_rename.changed == false
+        success_msg: "PASS [R14.1]: Idempotent — changed=false on re-rename"
+        fail_msg: "FAIL [R14.1]: Expected changed=false, got {{ second_rename }}"
+
+    - name: Rename back to the original name for the next run
+      keeper_update_folder:
+        folder_uid: "{{ fixture_folder.folder_uid }}"
+        new_folder_name: "{{ original_name }}"

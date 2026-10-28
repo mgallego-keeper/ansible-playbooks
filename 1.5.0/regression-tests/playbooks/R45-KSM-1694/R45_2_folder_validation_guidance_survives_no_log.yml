@@ -1,0 +1,77 @@
+---
+# R45.2 (KSM-1694): value-free validation guidance from the four folder actions must stay readable under
+# no_log: true and equal the no_log false text (engine wrappers such as "Task failed: " are ignored).
+# Every case fails before any request is sent, so no vault state changes.
+- name: "R45.2: folder action validation guidance under no_log"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    generic_msg: "The folder operation failed. Diagnostic details are hidden because no_log is enabled."
+    wrap: '^(Task failed: |Action failed: |Unexpected failure during module execution: )+'
+
+  tasks:
+    - name: get_folder name+path no_log true
+      keeper_get_folder: {shared_folder_uid: "{{ shared_folder_uid }}", folder_name: x, folder_path: [x]}
+      register: gf_p
+      ignore_errors: true
+      no_log: true
+    - name: get_folder name+path no_log false
+      keeper_get_folder: {shared_folder_uid: "{{ shared_folder_uid }}", folder_name: x, folder_path: [x]}
+      register: gf_u
+      ignore_errors: true
+
+    - name: get_folder no selector no_log true
+      keeper_get_folder: {}
+      register: gn_p
+      ignore_errors: true
+      no_log: true
+    - name: get_folder no selector no_log false
+      keeper_get_folder: {}
+      register: gn_u
+      ignore_errors: true
+
+    - name: create_folder blank folder_name no_log true
+      keeper_create_folder: {shared_folder_uid: "{{ shared_folder_uid }}", folder_name: ""}
+      register: cf_p
+      ignore_errors: true
+      no_log: true
+    - name: create_folder blank folder_name no_log false
+      keeper_create_folder: {shared_folder_uid: "{{ shared_folder_uid }}", folder_name: ""}
+      register: cf_u
+      ignore_errors: true
+
+    - name: update_folder blank new_folder_name no_log true
+      keeper_update_folder: {folder_uid: "AAAAAAAAAAAAAAAAAAAAAA", new_folder_name: ""}
+      register: uf_p
+      ignore_errors: true
+      no_log: true
+    - name: update_folder blank new_folder_name no_log false
+      keeper_update_folder: {folder_uid: "AAAAAAAAAAAAAAAAAAAAAA", new_folder_name: ""}
+      register: uf_u
+      ignore_errors: true
+
+    - name: delete_folder blank folder_uid no_log true
+      keeper_delete_folder: {folder_uid: ""}
+      register: df_p
+      ignore_errors: true
+      no_log: true
+    - name: delete_folder blank folder_uid no_log false
+      keeper_delete_folder: {folder_uid: ""}
+      register: df_u
+      ignore_errors: true
+
+    - name: Verify guidance is identical with no_log true and false and never the generic text
+      assert:
+        that:
+          - item.0.failed and item.1.failed
+          - not item.0.changed
+          - (item.0.msg | regex_replace(wrap, '')) == (item.1.msg | regex_replace(wrap, ''))
+          - (item.0.msg | regex_replace(wrap, '')) != generic_msg
+          - item.0.msg | length > 0
+        success_msg: "PASS [R45.2]: {{ item.0.msg }}"
+        fail_msg: "FAIL [R45.2]: no_log=true [{{ item.0.msg | default('') }}] vs no_log=false [{{ item.1.msg | default('') }}]"
+      loop: "{{ [[gf_p, gf_u], [gn_p, gn_u], [cf_p, cf_u], [uf_p, uf_u], [df_p, df_u]] }}"
+      loop_control: {label: "case {{ ansible_loop.index | default('') }}", extended: true}

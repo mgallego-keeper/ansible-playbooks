@@ -1,0 +1,35 @@
+---
+# R10.2: Omitting subfolder_uid still creates the record at the shared folder root (backward compatibility, KSM-845)
+- name: "R10.2: Create record without subfolder_uid"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+
+  tasks:
+    - name: Create record with subfolder_uid omitted
+      keeper_create:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        record_type: login
+        title: "R10.2 Root Record - {{ now(fmt='%Y%m%d_%H%M%S') }}"
+        generate_password: True
+        fields:
+          - type: login
+            value: "r10_2@example.com"
+      register: created
+      no_log: true
+
+    - name: Verify record_uid returned
+      assert:
+        that:
+          - created.record_uid is defined
+          - created.record_uid | length > 0
+        success_msg: "PASS [R10.2]: Record created at shared folder root — UID: {{ created.record_uid }}"
+        fail_msg: "FAIL [R10.2]: No record_uid returned"
+
+    - name: Cleanup
+      keeper_remove:
+        uid: "{{ created.record_uid }}"
+      ignore_errors: yes

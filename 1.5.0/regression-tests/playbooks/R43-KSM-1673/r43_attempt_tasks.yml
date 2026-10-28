@@ -1,0 +1,22 @@
+---
+# One invalid keeper_create attempt for R43_1. Included once per attempt: older ansible-core releases abort a looped
+# action when it raises AnsibleError, so each attempt runs as its own task and the outcome is stored in `outcomes`.
+# The lowercase file name keeps the batch runner from running this task list as a playbook.
+- name: "Attempt {{ attempt.0.id }} ({{ attempt.1 }} mode)"
+  keeper_create:
+    shared_folder_uid: "{{ attempt.0.shared }}"
+    subfolder_uid: "{{ attempt.0.sub }}"
+    record_type: login
+    title: "{{ tag }} {{ attempt.0.id }}-{{ attempt.1 }}"
+    login: "r43_user"
+  check_mode: "{{ attempt.1 == 'check' }}"
+  register: res
+  ignore_errors: true
+
+- name: "Record the outcome of {{ attempt.0.id }} ({{ attempt.1 }} mode)"
+  set_fact:
+    outcomes: >-
+      {{ (outcomes | default([])) + [{
+           'id': attempt.0.id, 'mode': attempt.1, 'expected': attempt.0.msg,
+           'failed': res is failed, 'msg': res.msg | default('')
+         }] }}

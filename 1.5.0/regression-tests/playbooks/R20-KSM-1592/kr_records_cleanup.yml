@@ -1,0 +1,16 @@
+---
+# Shared teardown for the R18 (KSM-1592) playbooks. Runs from an `always:` section, so it
+# reads the register variables directly: it still removes the records that were created
+# when setup stopped halfway.
+- name: Remove every throwaway record this playbook created
+  keeper_remove:
+    uid: "{{ item }}"
+  loop: >-
+    {{ (kr_created_pw.results | default([]) | selectattr('record_uid', 'defined') | map(attribute='record_uid') | list)
+       + ([kr_created_num.record_uid] if (kr_created_num is defined and kr_created_num.record_uid is defined) else []) }}
+  register: kr_cleanup
+  until: kr_cleanup is not failed
+  retries: 2
+  delay: 20
+  ignore_errors: true
+  no_log: true

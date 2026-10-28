@@ -1,0 +1,72 @@
+---
+# R42.2 (KSM-1648): verify R42_1's captured keeper_redact output
+#
+# Runs R42_1 as a subprocess with -v (ok results are only printed in verbose mode) with keeper_redact as the stdout callback and checks the captured stdout/stderr:
+#   - the inner run succeeded
+#   - no callback failure, UnicodeEncodeError or "surrogates not allowed" text
+#   - the originating binary task still renders its normal "ok" result, with a masked value
+#   - the ordinary secret fetched afterwards is masked and the public control stays visible
+# A callback cannot be asserted from inside its own play, so the check runs on captured output.
+
+- name: "R42.2: Verify keeper_redact survives a non-UTF-8 attachment"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    r42_1_playbook: "{{ playbook_dir }}/R42_1_binary_attachment_digest_learning.yml"
+  tasks:
+    - name: Run R42_1 playbook and capture output
+      shell: |
+        ansible-playbook -v "{{ r42_1_playbook }}" \
+          -e config_file="{{ config_file }}" \
+          -e attachment_record_uid="{{ attachment_record_uid }}" \
+          -e attachment_file_name="{{ attachment_file_name }}" \
+          -e password_record_uid="{{ password_record_uid }}"
+      environment:
+        ANSIBLE_CONFIG: "{{ playbook_dir }}/../../ansible.cfg"
+        ANSIBLE_ACTION_PLUGINS: "{{ repo_path }}/keeper_secrets_manager_ansible/plugins/action"
+        ANSIBLE_LOOKUP_PLUGINS: "{{ repo_path }}/keeper_secrets_manager_ansible/plugins/lookup"
+        ANSIBLE_CALLBACK_PLUGINS: "{{ repo_path }}/keeper_secrets_manager_ansible/plugins/callback"
+        ANSIBLE_MODULE_UTILS: "{{ repo_path }}/keeper_secrets_manager_ansible"
+        ANSIBLE_LIBRARY: "{{ repo_path }}/keeper_secrets_manager_ansible/plugins/modules"
+        ANSIBLE_STDOUT_CALLBACK: keeper_redact
+        OBJC_DISABLE_INITIALIZE_FORK_SAFETY: "YES"
+        KSM_CONFIG_SKIP_MODE_WARNING: "TRUE"
+      register: r42_output
+      no_log: true
+      ignore_errors: true
+
+    - name: Assert the inner run succeeded
+      assert:
+        that: r42_output.rc == 0
+        success_msg: "PASS [R42.2a]: inner playbook succeeded with keeper_redact active"
+        fail_msg: "FAIL [R42.2a]: inner playbook failed (rc={{ r42_output.rc }})"
+
+    - name: Assert no callback failure text
+      assert:
+        that:
+          - "'Failure using' not in r42_output.stdout and 'Failure using' not in r42_output.stderr"
+          - "'UnicodeEncodeError' not in r42_output.stdout and 'UnicodeEncodeError' not in r42_output.stderr"
+          - "'surrogates not allowed' not in r42_output.stdout and 'surrogates not allowed' not in r42_output.stderr"
+          - "'Callback dispatch' not in r42_output.stdout and 'Callback dispatch' not in r42_output.stderr"
+        success_msg: "PASS [R42.2b]: callback raised no encoding failure"
+        fail_msg: "FAIL [R42.2b]: keeper_redact failed while learning the binary attachment"
+
+    - name: Assert the originating binary task still rendered its result with a masked value
+      assert:
+        that:
+          - >-
+            r42_output.stdout is search('(?s)TASK .R42 binary fetch..*?ok: .localhost. => .*?[*]{4}.*?TASK .R42 binary display.')
+        success_msg: "PASS [R42.2c]: originating task output present and masked"
+        fail_msg: "FAIL [R42.2c]: originating binary task output missing or unmasked"
+
+    - name: Assert later output masks the secret and keeps the public control visible
+      assert:
+        that:
+          - "'R42_PUBLIC_CONTROL' in r42_output.stdout"
+          - >-
+            r42_output.stdout is search('(?s)R42 ordinary secret display.*?"secret": "[*]{4}"')
+          - "'JFIF' not in r42_output.stdout and 'Exif' not in r42_output.stdout"
+        success_msg: "PASS [R42.2d]: subsequent learning and public control behave correctly"
+        fail_msg: "FAIL [R42.2d]: later output wrongly masked/unmasked, or attachment bytes appeared"

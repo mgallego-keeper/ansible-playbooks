@@ -1,0 +1,82 @@
+---
+# Task file for run_batch.yml: run one playbook as its own process and record PASS / FAIL / SKIP.
+- name: "Run {{ pb.name }}"
+  command:
+    argv:
+      - "{{ ap_path }}"
+      - "{{ pb.path }}"
+      - -i
+      - "localhost,"
+      - -e
+      - "@{{ batch_dir.path }}/vars.json"
+  args:
+    chdir: "{{ pb.dir }}"
+  environment: "{{ {'ANSIBLE_NOCOLOR': '1', 'ANSIBLE_STDOUT_CALLBACK': 'default',
+                    'ANSIBLE_INVENTORY_UNPARSED_FAILED': 'False', 'KSM_CONFIG_SKIP_MODE_WARNING': 'TRUE'}
+                   | combine(batch_env | default({})) }}"
+  async: "{{ batch_timeout }}"
+  poll: 10
+  register: batch_run
+  failed_when: false
+  changed_when: false
+  when: not pb.host_only
+
+- name: "Retry {{ pb.name }} once when the vault throttled it"
+  block:
+    - name: Wait out the throttle
+      pause:
+        seconds: 70
+    - name: "Run {{ pb.name }} again"
+      command:
+        argv:
+          - "{{ ap_path }}"
+          - "{{ pb.path }}"
+          - -i
+          - "localhost,"
+          - -e
+          - "@{{ batch_dir.path }}/vars.json"
+      args:
+        chdir: "{{ pb.dir }}"
+      environment: "{{ {'ANSIBLE_NOCOLOR': '1', 'ANSIBLE_STDOUT_CALLBACK': 'default',
+                        'ANSIBLE_INVENTORY_UNPARSED_FAILED': 'False', 'KSM_CONFIG_SKIP_MODE_WARNING': 'TRUE'}
+                       | combine(batch_env | default({})) }}"
+      async: "{{ batch_timeout }}"
+      poll: 10
+      register: batch_retry
+      failed_when: false
+      changed_when: false
+  when:
+    - not pb.host_only
+    - batch_run.rc | default(0) != 0
+    - (batch_run.stdout | default('') ~ batch_run.stderr | default('')) is search('(?i)throttled|http error code 429')
+
+- name: Take the final run (the retry when there was one)
+  set_fact:
+    batch_final: "{{ batch_retry if (batch_retry is defined and batch_retry is not skipped and batch_retry.rc is defined) else (batch_run if (batch_run is defined and batch_run.rc is defined) else {'rc': 1, 'stdout': '', 'stderr': 'The playbook did not run.', 'delta': '0:00:00'}) }}"
+  when: not pb.host_only
+
+- name: Work out the result
+  set_fact:
+    batch_text: "{{ (batch_final.stdout | default('')) ~ '\n' ~ (batch_final.stderr | default('')) if not pb.host_only else '' }}"
+
+- name: Record the result
+  set_fact:
+    batch_results: >-
+      {{ batch_results | default([]) + [ {
+           'name': pb.name,
+           'result': ('SKIP' if (pb.host_only or ('SKIP [' in batch_text and (batch_final.rc | default(0)) == 0)) else ('PASS' if (batch_final.rc | default(1)) == 0 else 'FAIL')),
+           'line': (('SKIP' if (pb.host_only or ('SKIP [' in batch_text and (batch_final.rc | default(0)) == 0)) else ('PASS' if (batch_final.rc | default(1)) == 0 else 'FAIL'))
+                    ~ '  ' ~ (('0:00:00' if pb.host_only else (batch_final.delta | default('0:00:00'))) | string).split('.')[0] ~ '  ' ~ pb.name)
+         } ] }}
+
+- name: "Show why {{ pb.name }} failed (the last lines; the playbooks keep secrets out of their output)"
+  debug:
+    msg: "{{ (batch_text.split('\n') | reject('equalto', '') | list)[-25:] }}"
+  when:
+    - not pb.host_only
+    - batch_final.rc | default(1) != 0
+
+- name: Pause so the vault is not hit too fast
+  pause:
+    seconds: "{{ batch_pause }}"
+  when: not pb.host_only

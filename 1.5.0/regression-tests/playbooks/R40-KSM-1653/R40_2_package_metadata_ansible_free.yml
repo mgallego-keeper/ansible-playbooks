@@ -1,0 +1,42 @@
+---
+# R40.2 (KSM-1653): the README says the Python package does not install ansible-core, so the
+# package metadata and the collection runtime floor must agree with it.
+#
+# setup.py must not declare ansible-core; meta/runtime.yml must keep '>=2.15.13,!=2.17.*';
+# the Tower EE definition must keep Python 3.12 and ansible-core>=2.16.19,<2.17.
+# File-only check; no vault access. Needs variables: repo_path.
+- name: "R40.2: package metadata matches the README"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    galaxy_dir: "{{ repo_path }}/ansible_galaxy"
+    setup_py: "{{ lookup('file', repo_path ~ '/setup.py') }}"
+    runtime_yml: "{{ lookup('file', galaxy_dir ~ '/keepersecurity/keeper_secrets_manager/meta/runtime.yml') }}"
+    ee_yml: "{{ lookup('file', galaxy_dir ~ '/tower_execution_environment/execution-environment.yml') }}"
+    install_requires_block: "{{ setup_py.split('install_requires = [')[1].split(']')[0] }}"
+  tasks:
+    - name: setup.py install_requires does not list ansible-core
+      assert:
+        that:
+          - "'ansible' not in install_requires_block"
+          - "'keeper-secrets-manager-core>=17.3.0' in install_requires_block"
+          - "'keeper-secrets-manager-helper>=1.1.2' in install_requires_block"
+          - "\"python_requires='>=3.9.2'\" in setup_py"
+        success_msg: "PASS [R40.2]: package dependencies are Ansible-free with SDK/helper floors"
+        fail_msg: "FAIL [R40.2]: setup.py dependency metadata changed"
+
+    - name: Collection runtime floor is unchanged
+      assert:
+        that:
+          - "\"requires_ansible: '>=2.15.13,!=2.17.*'\" in runtime_yml"
+        success_msg: "PASS [R40.2]: runtime.yml requires_ansible preserved"
+        fail_msg: "FAIL [R40.2]: runtime.yml requires_ansible changed"
+
+    - name: Tower EE still provisions Python 3.12 and ansible-core 2.16
+      assert:
+        that:
+          - "'package_system: python3.12' in ee_yml"
+          - "'ansible-core>=2.16.19,<2.17' in ee_yml"
+        success_msg: "PASS [R40.2]: EE explicit engine provisioning preserved"
+        fail_msg: "FAIL [R40.2]: EE engine provisioning changed"

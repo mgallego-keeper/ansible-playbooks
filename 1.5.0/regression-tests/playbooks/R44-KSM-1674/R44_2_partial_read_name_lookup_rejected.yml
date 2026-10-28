@@ -1,0 +1,71 @@
+---
+# R44.2 (KSM-1674): a name or path lookup must fail when the SDK skipped a folder; explicit UIDs keep working.
+#
+# R44_probe.py wraps SecretsManager.get_folders to drop one real QA US folder and to log the SDK 17.4.0 skip warning
+# (public SDK 17.3.0 cannot reach this state itself, so this is a labeled simulation on real vault data). Every
+# name/path lookup must be rejected with no UID selected; every readable explicit-UID lookup must still succeed,
+# with include_subfolders false and true. Read-only; nothing is created or changed.
+# Needs variables: config_file, shared_folder_uid, shared_folder_name, ksm1673_shared_b (a second shared folder),
+# ksm1673_subfolder, ksm1673_deep_subfolder, ksm1674_databases_uid, ksm1674_production_uid, ksm1674_hidden_uid.
+# create_seed_records.yml creates the folder tree and prints these values.
+- name: "R44.2: Simulated partial read rejects name and path lookups"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    root_name: "KSM-1445 Root Folder Test"
+    nested_name: "KSM-1445 Nested Folder Test"
+    databases_name: "KSM-1478 Databases"
+    production_name: "KSM-1478 Production"
+    hidden_name: "KSM-1674 Hidden Folder"
+    r44_names:
+      ksm1673_subfolder: "{{ root_name }}"
+      ksm1673_deep_subfolder: "{{ nested_name }}"
+      ksm1674_databases_uid: "{{ databases_name }}"
+      ksm1674_production_uid: "{{ production_name }}"
+      ksm1674_hidden_uid: "{{ hidden_name }}"
+    probe_args:
+      res: "{{ shared_folder_uid }}"
+      users: "{{ ksm1673_shared_b }}"
+      hidden: "{{ ksm1674_hidden_uid }}"
+      databases: "{{ ksm1674_databases_uid }}"
+      subfolder: "{{ ksm1673_subfolder }}"
+      deep: "{{ ksm1673_deep_subfolder }}"
+      shared_name: "{{ shared_folder_name }}"
+      root_name: "{{ root_name }}"
+      databases_name: "{{ databases_name }}"
+      production_name: "{{ production_name }}"
+
+  tasks:
+    - name: Check the seeded folder tree
+      include_tasks: r44_preconditions.yml
+
+    - name: Run the simulated partial-read lookups
+      command:
+        argv: ["{{ ansible_playbook_python }}", "{{ playbook_dir }}/R44_probe.py", "{{ config_file }}", "{{ probe_args | to_json }}"]
+      environment:
+        KSM_CONFIG_SKIP_MODE_WARNING: "TRUE"
+      register: probe
+      changed_when: false
+
+    - name: Parse the result
+      set_fact:
+        sim: "{{ probe.stdout_lines | last | from_json }}"
+
+    - name: Assert every case
+      assert:
+        that: item.ok
+        fail_msg: "{{ item.id }} include_subfolders={{ item.include_subfolders }} {{ item.outcome }}: {{ item.detail }}"
+      loop: "{{ sim.results }}"
+      loop_control: {label: "{{ item.id }} include_subfolders={{ item.include_subfolders }}"}
+
+    - name: Assert rejections carry the uncertainty message
+      assert:
+        that: "'Absence and uniqueness cannot be confirmed' in item.detail or item.detail.startswith('Cannot select a folder by name or path')"
+        quiet: true
+      loop: "{{ sim.results | selectattr('outcome', 'equalto', 'rejected') | list }}"
+      loop_control: {label: "{{ item.id }}"}

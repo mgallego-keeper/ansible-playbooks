@@ -1,0 +1,22 @@
+---
+# R1.1: Missing config file error
+- name: "R1.1: Missing config file error"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Run keeper_get without any config
+      keeper_get:
+        uid: "XXXXXXXXXXXXXXXXXXXX"
+        field: login
+      register: result
+      ignore_errors: yes
+
+    - name: Verify error message
+      assert:
+        that:
+          - result.failed
+          - "'no config' in result.msg | lower or 'config file' in result.msg | lower or 'config keys' in result.msg | lower"
+        success_msg: "PASS [R1.1]: Missing config error — {{ result.msg | truncate(80) }}"
+        fail_msg: "FAIL [R1.1]: Unexpected result — {{ result }}"

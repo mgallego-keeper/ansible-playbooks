@@ -1,0 +1,338 @@
+---
+# R36.1: live keeper_set fails closed on an ambiguous update target (KSM-1666).
+#
+# Before the fix, keeper_set looked the target up with get_record(), which accepts lists and, for a title that matches
+# two records, picked one (or merged them) and saved a change to a record the author may not have meant. After the fix the update path:
+#   (a) accepts a list or tuple with ONE entry as that entry
+#   (b) rejects a list of 2 or more (also set / dict) with: "A record update requires a single UID or title."
+#   (c) fails when the title matches no record:   "Could not find any records that meet the criteria."
+#   (d) fails when the title matches 2 records:   "Found multiple records for the selection. Make sure records have a unique title or use a single UID."
+# and in every failing case nothing is saved. A unique title or a UID still updates, and check mode still predicts changed=true without saving.
+#
+# Run it with: -e config_file=<KSM config JSON> -e shared_folder_uid=<writable classic shared folder UID>
+# Optional: -e pace=25 (seconds between vault calls, QA US throttles with 429), -e strict=false (print the PASS/FAIL table and
+# do not fail the play, used to show what a build from BEFORE the fix does).
+#
+# Runs on the Galaxy collection (collections: below, short plugin names) and on a raw pip / source tree install
+# (plugin paths in ansible.cfg, ANSIBLE_COLLECTIONS_PATH = an EMPTY directory so that nothing shadows the code under test).
+# Prove which code ran with ANSIBLE_DEBUG ("Loading ActionModule" lines).
+#
+# Creates 3 records (K1666-u-<run>, K1666-d-<run> twice) in shared_folder_uid and ALWAYS removes them, by the exact UIDs
+# that keeper_create returned in this run.
+- name: "R36.1: live keeper_set update target validation"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    pace: 5
+    strict: true
+
+  tasks:
+    - name: Fix the run id once (a vars entry that calls now() is evaluated again at each use)
+      set_fact:
+        r36_run: "{{ now(fmt='%Y%m%d%H%M%S') }}"
+
+    - name: Set the titles
+      set_fact:
+        r36_u_title: "K1666-u-{{ r36_run }}"
+        r36_d_title: "K1666-d-{{ r36_run }}"
+        r36_missing_title: "K1666-missing-{{ r36_run }}"
+        r36_created: []
+
+    - name: Show the versions
+      debug:
+        msg: "ansible {{ ansible_version.full }} python {{ ansible_playbook_python }}"
+
+    - name: Run the scenario and always clean up
+      block:
+        - name: Create the unique record
+          keeper_create:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            record_type: login
+            title: "{{ r36_u_title }}"
+            fields:
+              - type: login
+                value: "orig-u"
+          register: r36_u
+          retries: 3
+          delay: 70
+          until: r36_u is not failed
+
+        - name: Remember the unique record
+          set_fact:
+            r36_created: "{{ r36_created + [r36_u.record_uid] }}"
+
+        - name: Pace
+          pause: {seconds: "{{ pace }}"}
+
+        - name: Create the first duplicate-title record
+          keeper_create:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            record_type: login
+            title: "{{ r36_d_title }}"
+            fields:
+              - type: login
+                value: "orig-d1"
+          register: r36_d1
+          retries: 3
+          delay: 70
+          until: r36_d1 is not failed
+
+        - name: Remember the first duplicate
+          set_fact:
+            r36_created: "{{ r36_created + [r36_d1.record_uid] }}"
+
+        - name: Pace
+          pause: {seconds: "{{ pace }}"}
+
+        - name: Create the second duplicate-title record
+          keeper_create:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            record_type: login
+            title: "{{ r36_d_title }}"
+            fields:
+              - type: login
+                value: "orig-d2"
+          register: r36_d2
+          retries: 3
+          delay: 70
+          until: r36_d2 is not failed
+
+        - name: Remember the second duplicate
+          set_fact:
+            r36_created: "{{ r36_created + [r36_d2.record_uid] }}"
+
+        - name: Pace
+          pause: {seconds: "{{ pace }}"}
+
+        # Case 1: unique title
+        - name: "Case 1: update by unique title"
+          keeper_set:
+            title: "{{ r36_u_title }}"
+            field: login
+            value: "by-title"
+          register: r36_c1
+          ignore_errors: true
+        - name: Pace
+          pause: {seconds: "{{ pace }}"}
+        - name: Read back after case 1
+          keeper_get:
+            uid: "{{ r36_u.record_uid }}"
+            field: login
+          register: r36_rb1
+          retries: 3
+          delay: 70
+          until: r36_rb1 is not failed
+        - name: Pace
+          pause: {seconds: "{{ pace }}"}
+
+        # Case 2: UID
+        - name: "Case 2: update by UID"
+          keeper_set:
+            uid: "{{ r36_u.record_uid }}"
+            field: login
+            value: "by-uid"
+          register: r36_c2
+          ignore_errors: true
+        - name: Pace
+          pause: {seconds: "{{ pace }}"}
+        - name: Read back after case 2
+          keeper_get:
+            uid: "{{ r36_u.record_uid }}"
+            field: login
+          register: r36_rb2
+          retries: 3
+          delay: 70
+          until: r36_rb2 is not failed
+        - name: Pace
+          pause: {seconds: "{{ pace }}"}
+
+        # Case 3: a list with one entry (UID, then title)
+        - name: "Case 3a: update by a list of 1 UID"
+          keeper_set:
+            uid: ["{{ r36_u.record_uid }}"]
+            field: login
+            value: "list1-uid"
+          register: r36_c3a
+          ignore_errors: true
+        - name: Pace
+          pause: {seconds: "{{ pace }}"}
+        - name: Read back after case 3a
+          keeper_get:
+            uid: "{{ r36_u.record_uid }}"
+            field: login
+          register: r36_rb3a
+          retries: 3
+          delay: 70
+          until: r36_rb3a is not failed
+        - name: Pace
+          pause: {seconds: "{{ pace }}"}
+        - name: "Case 3b: update by a list of 1 title"
+          keeper_set:
+            title: ["{{ r36_u_title }}"]
+            field: login
+            value: "list1-title"
+          register: r36_c3b
+          ignore_errors: true
+        - name: Pace
+          pause: {seconds: "{{ pace }}"}
+        - name: Read back after case 3b
+          keeper_get:
+            uid: "{{ r36_u.record_uid }}"
+            field: login
+          register: r36_rb3b
+          retries: 3
+          delay: 70
+          until: r36_rb3b is not failed
+        - name: Pace
+          pause: {seconds: "{{ pace }}"}
+
+        # Case 4: list of 2
+        - name: "Case 4a: list of 2 UIDs"
+          keeper_set:
+            uid: ["{{ r36_u.record_uid }}", "{{ r36_d1.record_uid }}"]
+            field: login
+            value: "list2-uid"
+          register: r36_c4a
+          ignore_errors: true
+        - name: "Case 4b: list of 2 titles"
+          keeper_set:
+            title: ["{{ r36_u_title }}", "{{ r36_d_title }}"]
+            field: login
+            value: "list2-title"
+          register: r36_c4b
+          ignore_errors: true
+        - name: Pace
+          pause: {seconds: "{{ pace }}"}
+        - name: Read back the unique record after case 4
+          keeper_get:
+            uid: "{{ r36_u.record_uid }}"
+            field: login
+          register: r36_rb4u
+          retries: 3
+          delay: 70
+          until: r36_rb4u is not failed
+        - name: Pace
+          pause: {seconds: "{{ pace }}"}
+        - name: Read back duplicate 1 after case 4
+          keeper_get:
+            uid: "{{ r36_d1.record_uid }}"
+            field: login
+          register: r36_rb4d1
+          retries: 3
+          delay: 70
+          until: r36_rb4d1 is not failed
+        - name: Pace
+          pause: {seconds: "{{ pace }}"}
+
+        # Case 5: duplicate title
+        - name: "Case 5: update by a title that matches 2 records"
+          keeper_set:
+            title: "{{ r36_d_title }}"
+            field: login
+            value: "dup-title-update"
+          register: r36_c5
+          ignore_errors: true
+        - name: Pace
+          pause: {seconds: "{{ pace }}"}
+        - name: Read back duplicate 1 after case 5
+          keeper_get:
+            uid: "{{ r36_d1.record_uid }}"
+            field: login
+          register: r36_rb5d1
+          retries: 3
+          delay: 70
+          until: r36_rb5d1 is not failed
+        - name: Pace
+          pause: {seconds: "{{ pace }}"}
+        - name: Read back duplicate 2 after case 5
+          keeper_get:
+            uid: "{{ r36_d2.record_uid }}"
+            field: login
+          register: r36_rb5d2
+          retries: 3
+          delay: 70
+          until: r36_rb5d2 is not failed
+        - name: Pace
+          pause: {seconds: "{{ pace }}"}
+
+        # Case 6: missing title
+        - name: "Case 6: update by a title that matches nothing"
+          keeper_set:
+            title: "{{ r36_missing_title }}"
+            field: login
+            value: "missing"
+          register: r36_c6
+          ignore_errors: true
+        - name: Pace
+          pause: {seconds: "{{ pace }}"}
+
+        # Case 7: check mode on the unique record
+        - name: "Case 7: check mode by title"
+          keeper_set:
+            title: "{{ r36_u_title }}"
+            field: login
+            value: "check-mode-value"
+          check_mode: true
+          register: r36_c7
+          ignore_errors: true
+        - name: Pace
+          pause: {seconds: "{{ pace }}"}
+        - name: Read back after case 7
+          keeper_get:
+            uid: "{{ r36_u.record_uid }}"
+            field: login
+          register: r36_rb7
+          retries: 3
+          delay: 70
+          until: r36_rb7 is not failed
+
+        - name: Evaluate the cases
+          set_fact:
+            r36_table:
+              c1_title_unique: "{{ (r36_c1 is not failed and r36_c1 is changed and r36_rb1.value == 'by-title') }}"
+              c2_uid: "{{ (r36_c2 is not failed and r36_c2 is changed and r36_rb2.value == 'by-uid') }}"
+              c3a_list1_uid: "{{ (r36_c3a is not failed and r36_c3a is changed and r36_rb3a.value == 'list1-uid') }}"
+              c3b_list1_title: "{{ (r36_c3b is not failed and r36_c3b is changed and r36_rb3b.value == 'list1-title') }}"
+              c4a_list2_uid_rejected: "{{ (r36_c4a is failed and (r36_c4a.msg | default('')) is search('A record update requires a single UID or title\\.') and r36_rb4u.value == 'list1-title' and r36_rb4d1.value == 'orig-d1') }}"
+              c4b_list2_title_rejected: "{{ (r36_c4b is failed and (r36_c4b.msg | default('')) is search('A record update requires a single UID or title\\.') and r36_rb4u.value == 'list1-title') }}"
+              c5_dup_title_rejected_none_modified: "{{ (r36_c5 is failed and (r36_c5.msg | default('')) is search('Found multiple records for the selection') and r36_rb5d1.value == 'orig-d1' and r36_rb5d2.value == 'orig-d2') }}"
+              c6_missing_title: "{{ (r36_c6 is failed and (r36_c6.msg | default('')) is search('Could not find any records that meet the criteria\\.')) }}"
+              c7_check_mode: "{{ (r36_c7 is not failed and r36_c7 is changed and r36_rb7.value == 'list1-title') }}"
+
+        - name: Print the per-case messages
+          debug:
+            msg:
+              c1: "failed={{ r36_c1.failed | default(false) }} changed={{ r36_c1.changed | default('') }} value={{ r36_rb1.value | default('') }}"
+              c2: "failed={{ r36_c2.failed | default(false) }} changed={{ r36_c2.changed | default('') }} value={{ r36_rb2.value | default('') }}"
+              c3a: "failed={{ r36_c3a.failed | default(false) }} changed={{ r36_c3a.changed | default('') }} value={{ r36_rb3a.value | default('') }}"
+              c3b: "failed={{ r36_c3b.failed | default(false) }} changed={{ r36_c3b.changed | default('') }} value={{ r36_rb3b.value | default('') }}"
+              c4a: "failed={{ r36_c4a.failed | default(false) }} changed={{ r36_c4a.changed | default('') }} msg={{ r36_c4a.msg | default('') }}"
+              c4b: "failed={{ r36_c4b.failed | default(false) }} changed={{ r36_c4b.changed | default('') }} msg={{ r36_c4b.msg | default('') }}"
+              c4_after: "unique={{ r36_rb4u.value | default('') }} dup1={{ r36_rb4d1.value | default('') }}"
+              c5: "failed={{ r36_c5.failed | default(false) }} changed={{ r36_c5.changed | default('') }} msg={{ r36_c5.msg | default('') }}"
+              c5_after: "dup1={{ r36_rb5d1.value | default('') }} dup2={{ r36_rb5d2.value | default('') }}"
+              c6: "failed={{ r36_c6.failed | default(false) }} msg={{ r36_c6.msg | default('') }}"
+              c7: "failed={{ r36_c7.failed | default(false) }} changed={{ r36_c7.changed | default('') }} value_after={{ r36_rb7.value | default('') }}"
+              table: "{{ r36_table }}"
+
+        - name: "Assert the cases"
+          assert:
+            that: "{{ r36_table.values() | list }}"
+            success_msg: "PASS [R36.1]: unique title, UID, list of 1 update; list of 2, duplicate title and missing title fail closed with the exact messages; check mode saves nothing"
+            fail_msg: "FAIL [R36.1]: {{ r36_table }}"
+          when: strict | bool
+
+      always:
+        - name: Pace before cleanup
+          pause: {seconds: "{{ pace }}"}
+
+        - name: Remove each record this run created, by the exact UID that keeper_create returned
+          keeper_remove:
+            uid: "{{ item }}"
+          loop: "{{ r36_created }}"
+          ignore_errors: true

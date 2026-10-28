@@ -1,0 +1,121 @@
+---
+# R34.3: keeper_delete_folder does not report an unreadable folder as deleted when the server sent no status, raw pip / source tree (KSM-1675).
+#
+# When the server returns no exact deletion status for the folder, the library confirms the delete by reading the
+# folders again. Before the fix, a read that SKIPPED the target (keeper-secrets-manager-core leaves out a folder it cannot
+# decode) made an existing folder look gone, and the task reported changed=true "deleted". After the fix the task fails
+# with "... and the folder is unreadable, so it can still exist." (or "... an unreadable folder has no UID ..." when the
+# skipped folder has a blank or null id). An unrelated skipped UID still allows true absence, an explicit "ok" status
+# succeeds with no extra read, an explicit refusal still fails, and check mode sends no request (one read).
+# The failure can still happen AFTER the delete request was sent: this is a confirmation fix, not prevention.
+#
+# An unreadable folder cannot be made in a live vault, so this runs the real SDK (keeper-secrets-manager-core) against the
+# repo's FakeKeeperServer (tests/folder_fake_server.py), which returns real encrypted folders and real per-folder
+# responses. kt_delete_folder_unconfirmed.py imports the plain `keeper_secrets_manager_ansible` package from the interpreter that runs
+# ansible-playbook (pip install, editable install or a source tree on PYTHONPATH), NOT the Galaxy collection. R34.3-src asserts
+# that the imported package is not inside an ansible_collections tree. Run it with an EMPTY ANSIBLE_COLLECTIONS_PATH.
+# It needs repo_path = integration/keeper_secrets_manager_ansible (for the stand-in server only).
+# Creates nothing in any vault. Expected to FAIL against code built before the fix (cases a, b and c).
+- name: "R34.3: keeper_delete_folder never confirms the delete of an unreadable folder, raw pip / source tree"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Run delete_folder against the real SDK
+      command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - "{{ playbook_dir }}/kt_delete_folder_unconfirmed.py"
+          - "{{ repo_path }}"
+      environment:
+        OBJC_DISABLE_INITIALIZE_FORK_SAFETY: "YES"
+        no_proxy: "*"
+      register: r34_run
+      changed_when: false
+
+    - name: Parse the cases
+      set_fact:
+        r34_data: "{{ r34_run.stdout | from_json }}"
+
+    - name: Assert the code under test is the pip package, not the Galaxy collection
+      assert:
+        that:
+          - r34_data.package_file is search('keeper_secrets_manager_ansible/__init__.py$')
+          - r34_data.package_file is not search('ansible_collections')
+        success_msg: "PASS [R34.3-src]: tested the pip package at {{ r34_data.package_file }}"
+        fail_msg: "FAIL [R34.3-src]: not the plain pip package: {{ r34_data.package_file }}"
+
+    - name: Select the cases
+      set_fact:
+        r34_skipped: "{{ r34_data.cases | selectattr('case', 'equalto', 'target_skipped') | list }}"
+        r34_noid: "{{ r34_data.cases | selectattr('case', 'match', 'skip_id_') | list }}"
+        r34_unrelated: "{{ r34_data.cases | selectattr('case', 'equalto', 'unrelated_skipped_gone') | list }}"
+        r34_present: "{{ r34_data.cases | selectattr('case', 'equalto', 'target_readable_present') | list }}"
+        r34_gone: "{{ r34_data.cases | selectattr('case', 'equalto', 'no_status_gone') | list }}"
+        r34_ok: "{{ r34_data.cases | selectattr('case', 'equalto', 'explicit_ok') | list }}"
+        r34_refused: "{{ r34_data.cases | selectattr('case', 'equalto', 'explicit_refusal') | list }}"
+        r34_check: "{{ r34_data.cases | selectattr('case', 'equalto', 'check_mode') | list }}"
+
+    - name: "Assert (a) a skipped target is refused with the unreadable message, for normal and force"
+      assert:
+        that:
+          - r34_skipped | length == 2
+          - r34_skipped | selectattr('outcome.error', 'defined') | list | length == 2
+          - r34_skipped | map(attribute='outcome.error') | select('search', 'and the folder is unreadable, so it can still exist\\.$') | list | length == 2
+          - r34_skipped | selectattr('target_still_in_server') | list | length == 2
+          - r34_skipped | map(attribute='folder_reads') | unique | list == [2]
+        success_msg: "PASS [R34.3a]: a skipped target with no status fails: '... the folder is unreadable, so it can still exist.' (normal and force)"
+        fail_msg: "FAIL [R34.3a]: an unreadable target was reported as deleted: {{ r34_skipped | map(attribute='outcome') | list }}"
+
+    - name: "Assert (b) a skipped folder with a null, empty or blank id is refused"
+      assert:
+        that:
+          - r34_noid | length == 6
+          - r34_noid | selectattr('outcome.error', 'defined') | list | length == 6
+          - r34_noid | map(attribute='outcome.error') | select('search', 'and an unreadable folder has no UID, so it can still exist\\.$') | list | length == 6
+          - r34_noid | selectattr('target_still_in_server') | list | length == 6
+        success_msg: "PASS [R34.3b]: a skipped folder with a null, empty or blank id fails: '... an unreadable folder has no UID, so it can still exist.' (normal and force)"
+        fail_msg: "FAIL [R34.3b]: an unidentified skipped folder did not block the confirmation: {{ r34_noid | map(attribute='outcome') | list }}"
+
+    - name: "Assert (c) a readable target that is still present is a failure"
+      assert:
+        that:
+          - r34_present | map(attribute='outcome.error') | select('search', 'and the folder still exists\\.$') | list | length == 2
+          - r34_present | selectattr('target_still_in_server') | list | length == 2
+        success_msg: "PASS [R34.3c]: a readable target that is still present fails: '... and the folder still exists.'"
+        fail_msg: "FAIL [R34.3c]: {{ r34_present | map(attribute='outcome') | list }}"
+
+    - name: "Assert (d) true absence is still confirmed, also when an unrelated exact UID is skipped"
+      assert:
+        that:
+          - r34_unrelated | length == 2
+          - r34_unrelated | map(attribute='outcome.result.changed') | unique | list == [true]
+          - r34_unrelated | map(attribute='outcome.result.folder_uid') | unique | list == ['TARGET_UID']
+          - r34_unrelated | rejectattr('target_still_in_server') | list | length == 2
+          - r34_gone | map(attribute='outcome.result.changed') | unique | list == [true]
+          - r34_gone | map(attribute='folder_reads') | unique | list == [2]
+        success_msg: "PASS [R34.3d]: a really-deleted folder with no status is confirmed gone (changed=true), also when UID OTHER_UID is skipped"
+        fail_msg: "FAIL [R34.3d]: true absence was refused: {{ r34_unrelated | map(attribute='outcome') | list }} {{ r34_gone | map(attribute='outcome') | list }}"
+
+    - name: "Assert (e) an explicit ok status succeeds with no extra read, an explicit refusal still fails"
+      assert:
+        that:
+          - r34_ok | map(attribute='outcome.result.changed') | unique | list == [true]
+          - r34_ok | map(attribute='folder_reads') | unique | list == [1]
+          - >-
+            r34_refused | map(attribute='outcome.error') | select('search', 'It returned access_denied: No permission\\.$') | list | length == 2
+          - r34_refused | map(attribute='folder_reads') | unique | list == [1]
+          - r34_refused | selectattr('target_still_in_server') | list | length == 2
+        success_msg: "PASS [R34.3e]: explicit ok succeeds with one read; explicit refusal fails: 'It returned access_denied: No permission.'"
+        fail_msg: "FAIL [R34.3e]: {{ r34_ok | map(attribute='outcome') | list }} {{ r34_refused | map(attribute='outcome') | list }}"
+
+    - name: "Assert (f) check mode sends no delete request and reads once"
+      assert:
+        that:
+          - r34_check | map(attribute='outcome.result.changed') | unique | list == [true]
+          - r34_check | map(attribute='delete_requests') | map('length') | sum == 0
+          - r34_check | map(attribute='folder_reads') | unique | list == [1]
+          - r34_check | selectattr('target_still_in_server') | list | length == 2
+        success_msg: "PASS [R34.3f]: check mode predicts changed=true, sends zero delete requests and reads once (normal and force)"
+        fail_msg: "FAIL [R34.3f]: {{ r34_check }}"

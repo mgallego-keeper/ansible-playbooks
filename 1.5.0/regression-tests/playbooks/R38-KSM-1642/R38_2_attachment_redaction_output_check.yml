@@ -1,0 +1,63 @@
+---
+# R38.2 (KSM-1642): verify R38_1's captured keeper_redact output has no attachment bytes
+#
+# Runs R38_1 as a subprocess with keeper_redact as the stdout callback and checks the captured stdout:
+#   - no JPEG magic text (JFIF / Exif) from the attachment
+#   - no bytes-serialization warning
+#   - the redaction marker "****" appears
+#   - the inner run succeeded
+# A callback cannot be asserted from inside its own play, so the check runs on captured output.
+
+- name: "R38.2: Verify keeper_redact masks attachment bytes in captured output"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    r38_1_playbook: "{{ playbook_dir }}/R38_1_attachment_redaction.yml"
+  tasks:
+    - name: Run R38_1 playbook and capture output
+      shell: |
+        ansible-playbook "{{ r38_1_playbook }}" \
+          -e config_file="{{ config_file }}" \
+          -e attachment_record_uid="{{ attachment_record_uid }}" \
+          -e attachment_file_name="{{ attachment_file_name }}"
+      environment:
+        ANSIBLE_CONFIG: "{{ playbook_dir }}/../../ansible.cfg"
+        ANSIBLE_ACTION_PLUGINS: "{{ repo_path }}/keeper_secrets_manager_ansible/plugins/action"
+        ANSIBLE_LOOKUP_PLUGINS: "{{ repo_path }}/keeper_secrets_manager_ansible/plugins/lookup"
+        ANSIBLE_CALLBACK_PLUGINS: "{{ repo_path }}/keeper_secrets_manager_ansible/plugins/callback"
+        ANSIBLE_MODULE_UTILS: "{{ repo_path }}/keeper_secrets_manager_ansible"
+        ANSIBLE_LIBRARY: "{{ repo_path }}/keeper_secrets_manager_ansible/plugins/modules"
+        ANSIBLE_STDOUT_CALLBACK: keeper_redact
+        OBJC_DISABLE_INITIALIZE_FORK_SAFETY: "YES"
+        KSM_CONFIG_SKIP_MODE_WARNING: "TRUE"
+      register: r38_output
+      no_log: true
+      ignore_errors: true
+
+    - name: Assert the inner run succeeded
+      assert:
+        that: r38_output.rc == 0
+        success_msg: "PASS [R38.2a]: inner playbook succeeded with keeper_redact active"
+        fail_msg: "FAIL [R38.2a]: inner playbook failed (rc={{ r38_output.rc }})"
+
+    - name: Assert no attachment bytes in output
+      assert:
+        that:
+          - "'JFIF' not in r38_output.stdout"
+          - "'Exif' not in r38_output.stdout"
+        success_msg: "PASS [R38.2b]: no attachment bytes in keeper_redact output"
+        fail_msg: "FAIL [R38.2b]: REDACTION BROKEN — attachment bytes appeared in output"
+
+    - name: Assert no bytes-serialization warning
+      assert:
+        that: "'not JSON serializable' not in r38_output.stdout and 'not JSON serializable' not in r38_output.stderr"
+        success_msg: "PASS [R38.2c]: no serialization warning"
+        fail_msg: "FAIL [R38.2c]: callback raised a bytes serialization warning"
+
+    - name: Assert the redaction marker is present
+      assert:
+        that: "'****' in r38_output.stdout"
+        success_msg: "PASS [R38.2d]: redaction marker present"
+        fail_msg: "FAIL [R38.2d]: redaction marker missing"

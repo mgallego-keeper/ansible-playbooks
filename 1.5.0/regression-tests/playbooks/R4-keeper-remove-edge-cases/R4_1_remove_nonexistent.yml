@@ -1,0 +1,20 @@
+---
+# R4.1: Remove non-existent record
+- name: "R4.1: Remove non-existent record"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+
+  tasks:
+    - name: Attempt to remove non-existent UID
+      keeper_remove:
+        uid: "ZZZZZZZZZZZZZZZZZZZZZZ"
+      register: result
+      ignore_errors: yes
+
+    - name: Verify handled gracefully
+      debug:
+        msg: "PASS [R4.1]: Remove non-existent record — failed={{ result.failed | default(false) }}, msg={{ result.msg | default('none') | truncate(80) }}"

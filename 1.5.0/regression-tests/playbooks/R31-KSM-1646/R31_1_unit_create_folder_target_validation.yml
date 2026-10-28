@@ -1,0 +1,40 @@
+---
+# R31.1: the create-folder target validation unit tests pass (KSM-1646).
+#
+# Before the fix, KeeperAnsible.create_folder looked up an existing folder by parent UID before it
+# checked that the parent belongs to the named shared folder. A subfolder_uid from a different
+# shared root, or a shared_folder_uid that was really a subfolder, could return an existing child
+# of the wrong root with changed=false.
+#
+# What this does: runs tests/keeper_create_folder_targeting_test.py from repo_path with the Python
+# that runs ansible-playbook (that Python needs pytest). The tests use the real SDK against a fake
+# server and cover wrong root, missing root, nested root and missing parent for an existing and a
+# new name, in normal and check mode, and that valid targets stay idempotent. Nothing touches the
+# vault. The test run writes no files into the repository.
+- name: "R31.1: unit tests for create-folder target validation pass"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Run the create-folder targeting tests
+      command: >-
+        env -u ANSIBLE_CONFIG {{ ansible_playbook_python }} -m pytest tests/keeper_create_folder_targeting_test.py
+        -q -p no:cacheprovider
+      args:
+        chdir: "{{ repo_path }}"
+      environment:
+        PYTHONDONTWRITEBYTECODE: "1"
+        KSM_CONFIG_SKIP_MODE_WARNING: "TRUE"
+      register: r31_unit
+      changed_when: false
+      failed_when: false
+
+    - name: Assert the tests ran and all passed
+      assert:
+        that:
+          - r31_unit.rc == 0
+          - "' passed' in r31_unit.stdout"
+          - "' failed' not in r31_unit.stdout"
+        success_msg: "PASS [R31.1]: {{ (r31_unit.stdout_lines | default([]) | last | default('')) }}"
+        fail_msg: "FAIL [R31.1]: rc={{ r31_unit.rc }} {{ (r31_unit.stdout_lines | default([]) | last | default('')) }} {{ (r31_unit.stderr_lines | default([]) | last | default('')) }} (the Python that runs ansible-playbook needs pytest and the packages in repo_path/requirements.txt: pip install pytest)"

@@ -1,0 +1,49 @@
+---
+# R24.1: keeper_init is skipped in check mode, so a dry run can never redeem the one-time token
+# or write a configuration file (KSM-1560). keeper_init sets _supports_check_mode = False, so
+# Ansible skips the task before the plugin runs.
+#
+# No vault access and no real token are needed: the token below is a placeholder that is never
+# read, because the plugin never starts. A run that did start would fail on the fake token and
+# could write a file, and either outcome fails this test.
+- name: "R24.1: keeper_init is skipped in check mode and writes nothing"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
+
+  vars:
+    target_config: "/tmp/r24_1_should_never_be_written.json"
+
+  tasks:
+    - name: Make sure no leftover file exists from an earlier run
+      file:
+        path: "{{ target_config }}"
+        state: absent
+
+    - name: Run keeper_init in check mode with a placeholder token
+      keeper_init:
+        token: "US:UNUSED_TOKEN_NOT_REAL"
+        filename: "{{ target_config }}"
+      check_mode: true
+      register: init_check
+
+    - name: Assert Ansible skipped the task instead of running it
+      assert:
+        that:
+          - init_check is skipped
+        success_msg: "PASS [R24.1]: keeper_init was skipped in check mode"
+        fail_msg: "FAIL [R24.1]: keeper_init ran in check mode instead of being skipped -- got {{ init_check }}"
+
+    - name: Look for a configuration file the task might have written
+      stat:
+        path: "{{ target_config }}"
+      register: written_file
+
+    - name: Assert no configuration file was written
+      assert:
+        that:
+          - not written_file.stat.exists
+        success_msg: "PASS [R24.1]: no configuration file was written"
+        fail_msg: "FAIL [R24.1]: a configuration file was written in check mode"

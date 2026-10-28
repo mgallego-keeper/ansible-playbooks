@@ -1,0 +1,19 @@
+---
+# Inner playbook for R20.3. Not a test by itself. keeper_copy of each password field (notation) to a
+# directory that does not exist, so every copy FAILS and the failure result is printed.
+# Expects -e: keeper_config_file, kr_pw_uids (list), kr_num_uid.
+- name: "KSM-1592 inner: failing keeper_copy"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
+
+  tasks:
+    - name: keeper_copy a password field into a missing directory (must fail)
+      keeper_copy:
+        notation: "{{ item }}/field/password"
+        dest: "/nonexistent-ksmv-dir/out.txt"
+      loop: "{{ kr_pw_uids }}"
+      register: kr_copy
+      ignore_errors: true

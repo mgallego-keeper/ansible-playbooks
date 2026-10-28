@@ -1,0 +1,49 @@
+---
+# R5.1: All unit tests pass
+- name: "R5.1: Full unit test suite"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    # Fail early with the cause instead of a pytest import error: this suite needs pytest and the
+    # package under test importable by the python3 that runs it.
+    - name: Check pytest and the package under test are importable
+      command: env -u ANSIBLE_CONFIG python3 -c "import pytest, keeper_secrets_manager_ansible"
+      args:
+        chdir: "{{ repo_path }}"
+      register: preflight
+      changed_when: false
+      failed_when: false
+
+    - name: Explain a failed preflight
+      assert:
+        that:
+          - preflight.rc == 0
+        fail_msg: "FAIL [R5.1]: python3 cannot import pytest and keeper_secrets_manager_ansible (run `pip install pytest` and `pip install -e <repo_path>` in the environment that runs this suite). {{ preflight.stderr_lines | default([]) | last | default('') }}"
+
+    # The runner exports ANSIBLE_CONFIG for this playbook. The repo's own unit tests write
+    # their own ansible.cfg (some of them select a stdout callback), and an inherited
+    # ANSIBLE_CONFIG overrides it, which fails those tests for a reason unrelated to the code.
+    - name: Run full pytest suite
+      command: env -u ANSIBLE_CONFIG python3 -m pytest tests/ -v
+      args:
+        chdir: "{{ repo_path }}"
+      register: result
+      environment:
+        OBJC_DISABLE_INITIALIZE_FORK_SAFETY: "YES"
+
+    - name: Verify all tests pass
+      # rc == 0 is the only reliable signal — pytest only ever exits non-zero on a real
+      # failure/error. A substring search for "failed" anywhere in -v output false-positives
+      # on any passing test whose *name* happens to contain that word (e.g.
+      # test_a_failed_request_uses_the_cache_with_a_warning), so don't do that.
+      assert:
+        that:
+          - result.rc == 0
+        success_msg: "PASS [R5.1]: Full test suite passed"
+        fail_msg: "FAIL [R5.1]: Tests failed — {{ result.stdout_lines[-3:] | join(', ') }}"
+
+    - name: Show summary
+      debug:
+        msg: "{{ result.stdout_lines[-1] }}"

@@ -1,0 +1,42 @@
+# R13.2: keeper_get_folder fails clearly (never an empty result) for a nonexistent name,
+# and rejects a misspelled option (KSM-1478).
+- name: "R13.2: keeper_get_folder negative cases"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    missing_name: "R13-KSM-1478 Does Not Exist"
+
+  tasks:
+    - name: Look up a folder_name that does not exist
+      keeper_get_folder:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        folder_name: "{{ missing_name }}"
+      register: missing
+      ignore_errors: true
+
+    - name: Assert a clear failure naming the missing folder, not an empty value
+      assert:
+        that:
+          - missing is failed
+          - missing.folder_uid is not defined
+          - "'No folder named \"' + missing_name + '\" was found' in missing.msg"
+        success_msg: "PASS [R13.2]: Clear failure — {{ missing.msg }}"
+        fail_msg: "FAIL [R13.2]: {{ missing }}"
+
+    - name: A misspelled option is rejected
+      keeper_get_folder:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        folder_nmae: "whatever"
+      register: bad_option
+      ignore_errors: true
+
+    - name: Assert the task fails naming the unsupported parameter
+      assert:
+        that:
+          - bad_option is failed
+          - "'Unsupported parameters for (keeper_get_folder) module: folder_nmae' in bad_option.msg"
+        success_msg: "PASS [R13.2]: Rejected — {{ bad_option.msg }}"
+        fail_msg: "FAIL [R13.2]: {{ bad_option }}"

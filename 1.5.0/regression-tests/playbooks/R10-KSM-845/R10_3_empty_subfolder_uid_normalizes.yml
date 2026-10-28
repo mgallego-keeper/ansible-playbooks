@@ -1,0 +1,36 @@
+---
+# R10.3: An empty-string subfolder_uid normalizes to None instead of reaching the server (KSM-1454)
+- name: "R10.3: Create record with subfolder_uid set to empty string"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+
+  tasks:
+    - name: Create record with empty-string subfolder_uid
+      keeper_create:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        subfolder_uid: ""
+        record_type: login
+        title: "R10.3 EmptyString Record - {{ now(fmt='%Y%m%d_%H%M%S') }}"
+        generate_password: True
+        fields:
+          - type: login
+            value: "r10_3@example.com"
+      register: created
+      no_log: true
+
+    - name: Verify record_uid returned despite empty-string subfolder_uid
+      assert:
+        that:
+          - created.record_uid is defined
+          - created.record_uid | length > 0
+        success_msg: "PASS [R10.3]: Record created despite empty-string subfolder_uid — UID: {{ created.record_uid }}"
+        fail_msg: "FAIL [R10.3]: No record_uid returned"
+
+    - name: Cleanup
+      keeper_remove:
+        uid: "{{ created.record_uid }}"
+      ignore_errors: yes

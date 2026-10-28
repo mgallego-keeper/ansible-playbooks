@@ -1,0 +1,81 @@
+---
+# R11.1: Record cache encrypt/decrypt round trip uses JSON, not pickle (KSM-1103)
+#
+# QA setup: none. The playbook creates and removes its own fixture record in shared_folder_uid.
+#
+# Regression for KSM-1103 (CWE-502):
+# the record cache used to serialize decrypted records via Python
+# pickle.dump/pickle.loads. Fixed to round-trip records through JSON-safe
+# dicts instead. This playbook proves the fixed path still produces correct
+# values for a live-vault record cached and read back through it.
+
+- name: "R11.1: JSON record cache round trip (KSM-1103)"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+
+  tasks:
+    - name: Create the fixture record (known login and url, so no seed record is needed)
+      keeper_create:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        record_type: login
+        title: "R11 Cache Fixture - {{ now(fmt='%Y%m%d_%H%M%S') }}"
+        fields:
+          - type: login
+            value: "r11_qa_user"
+          - type: url
+            value: "https://qa.example.com"
+      register: r11_record
+      no_log: true
+
+    - block:
+      - name: Generate cache secret
+        keeper_password:
+          length: 64
+        register: cache_secret_gen
+        no_log: true
+
+      - name: Store cache secret
+        set_fact:
+          keeper_record_cache_secret: "{{ cache_secret_gen.password }}"
+        no_log: true
+
+      - name: Cache seed record from live vault
+        keeper_cache_records:
+          uids:
+            - "{{ r11_record.record_uid }}"
+        register: cached
+        no_log: true
+
+      - name: Read login field back through the cache
+        keeper_get:
+          cache: "{{ cached.cache }}"
+          uid: "{{ r11_record.record_uid }}"
+          field: login
+        register: login_result
+
+      - name: Read url field back through the cache
+        keeper_get:
+          cache: "{{ cached.cache }}"
+          uid: "{{ r11_record.record_uid }}"
+          field: url
+        register: url_result
+
+      - name: Assert JSON cache round trip is correct
+        assert:
+          that:
+            - login_result.value == "r11_qa_user"
+            - url_result.value == "https://qa.example.com"
+          success_msg: "PASS [R11.1]: JSON cache round trip correct — login={{ login_result.value }}, url={{ url_result.value }}"
+          fail_msg: "FAIL [R11.1]: JSON cache round trip incorrect"
+
+      always:
+        - name: Remove the fixture record
+          keeper_remove:
+            uid: "{{ r11_record.record_uid }}"
+          ignore_errors: yes

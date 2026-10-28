@@ -1,0 +1,53 @@
+# R12.1: keeper_create_folder creates a folder directly in the shared folder, and
+# re-running with the same name/parent does not create a duplicate (KSM-1445).
+- name: "R12.1: keeper_create_folder idempotent creation at shared-folder root"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    folder_name: "R12-KSM-1445 Regression Root Folder"
+
+  tasks:
+    - name: Create the regression folder
+      keeper_create_folder:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        folder_name: "{{ folder_name }}"
+      register: first_create
+
+    - name: Verify folder_uid returned
+      assert:
+        that:
+          - first_create.folder_uid is defined
+          - first_create.folder_uid | length > 0
+        success_msg: "PASS [R12.1]: Folder created — UID {{ first_create.folder_uid }}"
+        fail_msg: "FAIL [R12.1]: No folder_uid returned"
+
+    - name: Re-create the same folder (idempotency)
+      keeper_create_folder:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        folder_name: "{{ folder_name }}"
+      register: second_create
+
+    - name: Assert the second run did not create a duplicate
+      assert:
+        that:
+          - second_create.changed == false
+          - second_create.folder_uid == first_create.folder_uid
+        success_msg: "PASS [R12.1]: Idempotent — same UID {{ second_create.folder_uid }}, changed=false"
+        fail_msg: "FAIL [R12.1]: Expected changed=false and the same folder_uid as the first create"
+
+    - name: Attempt to create a folder with shared_folder_uid missing
+      keeper_create_folder:
+        folder_name: "This should never be created"
+      register: missing_uid_result
+      ignore_errors: true
+
+    - name: Assert the missing shared_folder_uid fails with a clear error
+      assert:
+        that:
+          - missing_uid_result is failed
+          - "'shared_folder_uid' in missing_uid_result.msg"
+        success_msg: "PASS [R12.1]: Missing shared_folder_uid rejected — {{ missing_uid_result.msg }}"
+        fail_msg: "FAIL [R12.1]: Expected a failure mentioning shared_folder_uid, got: {{ missing_uid_result }}"

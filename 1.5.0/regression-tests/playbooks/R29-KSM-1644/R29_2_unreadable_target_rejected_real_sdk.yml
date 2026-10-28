@@ -1,0 +1,87 @@
+---
+# R29.2: keeper_remove does not report an unreadable existing record as missing (KSM-1644).
+#
+# Before the fix remove_record() read the vault with get_secrets(), which leaves out any record the SDK
+# cannot decrypt or parse (for example a record with an attachment whose file key is invalid), and then
+# treated the empty list as "the record is not there". keeper_remove answered changed=false, "The record was
+# not found, or it is not shared to this KSM application. Nothing was deleted." while the record stayed in
+# the vault. After the fix it fails with an unreadable-target message, and it will not pick a record by
+# title when unreadable records make absence or uniqueness unknowable.
+#
+# An unreadable record cannot be made in a live vault, so this runs the real SDK (keeper-secrets-manager-core)
+# against the repo's UnreadableRecordServer, a stand-in for the server that returns real encrypted records plus
+# one the SDK omits. kt_unreadable.py imports the INSTALLED collection (not the repo source), so this tests the
+# built collection. It needs repo_path only for that stand-in server.
+# The collections root is the first entry of ANSIBLE_COLLECTIONS_PATH (default ~/.ansible/collections).
+# Creates nothing in any vault. Expected to FAIL against a collection built before the fix.
+- name: "R29.2: keeper_remove rejects an unreadable target and keeps genuine-absence idempotency"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    r29_collections_root: "{{ (lookup('env', 'ANSIBLE_COLLECTIONS_PATH') | default('', true) | split(':') | first) | default('', true) or (lookup('env', 'HOME') ~ '/.ansible/collections') }}"
+    r29_not_found: "The record was not found, or it is not shared to this KSM application. Nothing was deleted."
+
+  tasks:
+    - name: Run remove_record from the installed collection against the real SDK
+      command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - "{{ playbook_dir }}/kt_unreadable.py"
+          - "{{ r29_collections_root }}"
+          - "{{ repo_path }}"
+      environment:
+        OBJC_DISABLE_INITIALIZE_FORK_SAFETY: "YES"
+        no_proxy: "*"
+      register: r29_run
+      changed_when: false
+
+    - name: Parse the cases
+      set_fact:
+        r29_cases: "{{ r29_run.stdout | from_json }}"
+        r29_unreadable: "{{ (r29_run.stdout | from_json) | selectattr('selector.uids', 'defined') | selectattr('selector.uids', 'equalto', 'RECORD_UID') | list }}"
+        r29_title: "{{ (r29_run.stdout | from_json) | selectattr('selector.titles', 'defined') | list }}"
+        r29_missing: "{{ (r29_run.stdout | from_json) | selectattr('selector.uids', 'defined') | selectattr('selector.uids', 'equalto', 'MISSING_UID') | list }}"
+        r29_other: "{{ (r29_run.stdout | from_json) | selectattr('selector.uids', 'defined') | selectattr('selector.uids', 'equalto', 'OTHER_UID') | list }}"
+
+    - name: Assert all 4 unreadable faults, normal and check mode, fail with the unreadable diagnostic and delete nothing
+      assert:
+        that:
+          - r29_unreadable | length == 8
+          - r29_unreadable | selectattr('outcome.error', 'defined') | list | length == 8
+          - r29_unreadable | map(attribute='outcome.error') | select('search', 'The requested record UID\(s\) RECORD_UID exist, but are unreadable by keeper-secrets-manager-core. Nothing was deleted.') | list | length == 8
+          - r29_unreadable | map(attribute='delete_requests') | map('length') | sum == 0
+          - r29_unreadable | selectattr('target_still_in_server') | list | length == 8
+        success_msg: "PASS [R29.2a]: unreadable target fails with 'exist, but are unreadable ... Nothing was deleted.' for attachment/record_data/folder_key/folder_peer, in normal and check mode, zero delete requests"
+        fail_msg: "FAIL [R29.2a]: an unreadable target was not rejected: {{ r29_unreadable | map(attribute='outcome') | list }}"
+
+    - name: Assert title selection refuses to decide when unreadable records exist
+      assert:
+        that:
+          - r29_title | length == 2
+          - r29_title | map(attribute='outcome.error') | select('search', 'Cannot select a record by title because keeper-secrets-manager-core returned unreadable records or folders') | list | length == 2
+          - r29_title | map(attribute='delete_requests') | map('length') | sum == 0
+        success_msg: "PASS [R29.2b]: title selection fails ('Absence and uniqueness cannot be confirmed') in normal and check mode, nothing deleted"
+        fail_msg: "FAIL [R29.2b]: title selection did not refuse: {{ r29_title | map(attribute='outcome') | list }}"
+
+    - name: Assert genuine absence is still an idempotent no-op even though an unreadable record exists elsewhere
+      assert:
+        that:
+          - r29_missing | length == 2
+          - r29_missing | map(attribute='outcome.result.changed') | unique | list == [false]
+          - r29_missing | map(attribute='outcome.result.msg') | unique | list == [r29_not_found]
+          - r29_missing | map(attribute='delete_requests') | map('length') | sum == 0
+        success_msg: "PASS [R29.2c]: a UID that does not exist still returns changed=false with the original not-found message"
+        fail_msg: "FAIL [R29.2c]: genuine absence is no longer idempotent: {{ r29_missing | map(attribute='outcome') | list }}"
+
+    - name: Assert a readable record next to an unreadable one still removes (normal) and predicts (check mode)
+      assert:
+        that:
+          - r29_other | length == 2
+          - r29_other | map(attribute='outcome.result.changed') | unique | list == [true]
+          - r29_other | map(attribute='outcome.result.record_uid') | unique | list == ['OTHER_UID']
+          - (r29_other | rejectattr('check_mode') | first).delete_requests == [['OTHER_UID']]
+          - (r29_other | selectattr('check_mode') | first).delete_requests == []
+        success_msg: "PASS [R29.2d]: readable OTHER_UID is deleted in a normal run (one delete request) and only predicted in check mode (zero)"
+        fail_msg: "FAIL [R29.2d]: readable record behavior changed: {{ r29_other }}"

@@ -1,0 +1,51 @@
+# R19.1: keeper_cache_records (not keeper_get_records_cache) renders cleanly via ansible-doc,
+# and no plugin file anywhere in the collection still refers to the old module name
+# keeper_get_records_cache (KSM-1588).
+- name: "R19.1: cache module keeps its KSM-1588 rename and documentation"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+
+  tasks:
+    - name: Run ansible-doc for the renamed cache module and its callers
+      command:
+        cmd: "ansible-doc -t module {{ item }}"
+      environment:
+        ANSIBLE_LIBRARY: "{{ repo_path }}/keeper_secrets_manager_ansible/plugins/modules"
+        ANSIBLE_NOCOLOR: "1"
+      loop:
+        - keeper_cache_records
+        - keeper_get
+        - keeper_copy
+        - keeper_set
+      register: doc_results
+      changed_when: false
+      failed_when: false
+
+    - name: Assert each module renders and the old module name is gone from its own doc
+      assert:
+        that:
+          - item.rc == 0
+          - "'keeper_get_records_cache' not in item.stdout"
+        success_msg: "PASS [R19.1]: ansible-doc for {{ item.item }} is clean of the old module name"
+        fail_msg: "FAIL [R19.1]: {{ item.item }} still references keeper_get_records_cache — {{ item.stdout }}"
+      loop: "{{ doc_results.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Grep the repo's plugin source for any leftover reference to the retired module name
+      ansible.builtin.shell: >
+        grep -rln --exclude-dir=__pycache__ --exclude="*.pyc" "keeper_get_records_cache" {{ repo_path }}/keeper_secrets_manager_ansible/plugins/
+        || true
+      register: leftover_grep
+      changed_when: false
+
+    - name: Assert zero files reference the retired module name
+      assert:
+        that:
+          - leftover_grep.stdout | trim == ""
+        success_msg: "PASS [R19.1]: no plugin file references keeper_get_records_cache"
+        fail_msg: "FAIL [R19.1]: these files still reference keeper_get_records_cache: {{ leftover_grep.stdout }}"

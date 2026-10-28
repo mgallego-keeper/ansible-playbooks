@@ -1,0 +1,63 @@
+---
+# R10.1: keeper_create with subfolder_uid creates the record inside that subfolder (KSM-845)
+- name: "R10.1: Create record with subfolder_uid"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    subfolder_name: "R10-KSM-845 Regression Subfolder"
+
+  tasks:
+    - name: Create or reuse regression subfolder
+      keeper_create_folder:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        folder_name: "{{ subfolder_name }}"
+      register: test_folder
+
+    - name: Create record with subfolder_uid set
+      keeper_create:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        subfolder_uid: "{{ test_folder.folder_uid }}"
+        record_type: login
+        title: "R10.1 Subfolder Record - {{ now(fmt='%Y%m%d_%H%M%S') }}"
+        generate_password: True
+        fields:
+          - type: login
+            value: "r10_1@example.com"
+      register: created
+      no_log: true
+
+    - name: Verify record_uid returned
+      assert:
+        that:
+          - created.record_uid is defined
+          - created.record_uid | length > 0
+        success_msg: "PASS [R10.1]: Record created — UID: {{ created.record_uid }}"
+        fail_msg: "FAIL [R10.1]: No record_uid returned"
+
+    - name: Verify record lands in the subfolder
+      # argv form, not an interpolated string — avoids shlex word-splitting on config paths with spaces.
+      command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - "{{ playbook_dir }}/verify_folder_placement.py"
+          - "{{ keeper_config_file }}"
+          - "{{ test_folder.folder_uid }}"
+          - "{{ created.record_uid }}"
+      register: placement_check
+      changed_when: false
+
+    - name: Assert placement check found the record in the subfolder
+      assert:
+        that:
+          # An exact match: the helper prints FOUND or NOT_FOUND, and 'FOUND' is a substring of 'NOT_FOUND'.
+          - placement_check.stdout | trim == 'FOUND'
+        success_msg: "PASS [R10.1]: Record confirmed inside subfolder {{ test_folder.folder_uid }}"
+        fail_msg: "FAIL [R10.1]: Record NOT found in subfolder — {{ placement_check.stdout }}"
+
+    - name: Cleanup
+      keeper_remove:
+        uid: "{{ created.record_uid }}"
+      ignore_errors: yes

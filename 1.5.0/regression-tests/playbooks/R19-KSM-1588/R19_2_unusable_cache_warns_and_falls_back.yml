@@ -1,0 +1,36 @@
+# R19.2: an unusable (legacy-format or wrong-secret) record cache must warn and fall back to a
+# live vault read, never crash the task. This is the exact behavior KSM-1588 newly documents in
+# the cache option text of keeper_get/keeper_copy/keeper_get_record/keeper_set/the lookup. This
+# guard protects that documented behavior itself, not just the wording (KSM-1588, KSM-1103).
+- name: "R19.2: an unusable cache falls back to the vault instead of failing"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    keeper_record_cache_secret: "R19-regression-test-secret-do-not-reuse-9d4e1b7a3c5f6082"
+
+  tasks:
+    - name: Read the field directly from the vault (no cache) as the expected value
+      keeper_get:
+        uid: "{{ record_uid }}"
+        field: login
+      register: direct_read
+      no_log: true
+
+    - name: Read the same field with a garbage/legacy-format cache value
+      keeper_get:
+        uid: "{{ record_uid }}"
+        field: login
+        cache: "this-is-not-a-fernet-token-and-simulates-a-pre-1.5.0-pickle-cache"
+      register: fallback_read
+      no_log: true
+
+    - name: Assert the task succeeded (no crash) and returned the correct, vault-sourced value
+      assert:
+        that:
+          - fallback_read is succeeded
+          - fallback_read.value == direct_read.value
+        success_msg: "PASS [R19.2]: an unusable cache was ignored with a warning and the vault value was returned"
+        fail_msg: "FAIL [R19.2]: an unusable cache did not fall back to the vault cleanly"

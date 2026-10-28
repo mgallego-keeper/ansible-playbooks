@@ -1,0 +1,60 @@
+# R16.2: keeper_remove fails on an ambiguous title (listing both UIDs, deleting nothing),
+# and the failure is returned as a task result so a block/rescue can handle it (KSM-1559).
+- name: "R16.2: keeper_remove ambiguous title + block/rescue"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    title: "R16-KSM-1559 Regression Twin"
+
+  tasks:
+    - name: Create two records with the same title
+      keeper_create:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        record_type: login
+        title: "{{ title }}"
+        generate_password: true
+        fields:
+          - type: login
+            value: "r16-2-{{ item }}@example.com"
+      loop: [1, 2]
+      register: twin_records
+      no_log: true
+
+    - name: Remove by the ambiguous title inside a block/rescue
+      block:
+        - name: Remove by the ambiguous title
+          keeper_remove:
+            title: "{{ title }}"
+          register: ambiguous_remove
+
+        - name: This task must never run
+          set_fact:
+            unreachable_marker: true
+      rescue:
+        - name: Mark that the rescue section ran
+          set_fact:
+            rescue_ran: true
+
+    - name: Assert the rescue ran, naming both UIDs, and nothing was deleted
+      vars:
+        twin_uid_1: "{{ twin_records.results[0].record_uid }}"
+        twin_uid_2: "{{ twin_records.results[1].record_uid }}"
+      assert:
+        that:
+          - rescue_ran | default(false) == true
+          - unreachable_marker is not defined
+          - twin_uid_1 in ambiguous_remove.msg
+          - twin_uid_2 in ambiguous_remove.msg
+        success_msg: "PASS [R16.2]: Rescue ran — {{ ambiguous_remove.msg }}"
+        fail_msg: "FAIL [R16.2]: {{ ambiguous_remove }}"
+
+    - name: Clean up both twin records
+      keeper_remove:
+        uid: "{{ item.record_uid }}"
+      loop: "{{ twin_records.results }}"
+      ignore_errors: true

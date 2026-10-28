@@ -1,0 +1,59 @@
+---
+# R27.2: resolving `pip install` of the package does not select ansible-core (KSM-1649).
+#
+# Before the fix, pip resolved ansible-core (and its dependencies) together with the package.
+# This test asks pip what it WOULD install, with --dry-run --ignore-installed --report, so the
+# running environment is not changed, and the resolution cannot be satisfied by the ansible-core
+# that runs this playbook.
+#
+# What this does: copies the package files (not the whole checkout) from repo_path into a
+# scratch directory so the build leaves no files in the repository, runs pip's dry-run
+# resolver on that copy with the Python that runs ansible-playbook, and checks the report:
+# keeper-secrets-manager-core is in it (proves the resolver really ran and read the
+# requirements) and ansible-core is not. The scratch directory is removed whatever happens.
+# Needs network access to the package index.
+- name: "R27.2: pip dry-run resolution of the package omits ansible-core"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Run the scenario and always clean up
+      block:
+        - name: Make a scratch directory
+          tempfile:
+            state: directory
+            suffix: ksmv_r19_2
+          register: r27_dir
+
+        - name: Copy the package files into it
+          command: cp -R setup.py README.md requirements.txt keeper_secrets_manager_ansible {{ r27_dir.path }}/
+          args:
+            chdir: "{{ repo_path }}"
+          changed_when: false
+
+        - name: Ask pip what it would install
+          command: >-
+            {{ ansible_playbook_python }} -m pip install --dry-run --ignore-installed --quiet
+            --disable-pip-version-check --report - {{ r27_dir.path }}
+          register: r27_pip
+          changed_when: false
+
+        - name: Assert the resolution holds the SDK packages and no ansible-core
+          vars:
+            r27_names: "{{ (r27_pip.stdout | from_json).install | map(attribute='metadata.name') | map('lower') | list }}"
+          assert:
+            that:
+              - "'keeper-secrets-manager-core' in r27_names"
+              - "'keeper-secrets-manager-helper' in r27_names"
+              - "'ansible-core' not in r27_names"
+              - "'ansible' not in r27_names"
+            success_msg: "PASS [R27.2]: pip would install {{ r27_names | sort | join(', ') }} and no ansible-core"
+            fail_msg: "FAIL [R27.2]: pip would install {{ r27_names | sort | join(', ') }}"
+
+      always:
+        - name: Remove the scratch directory
+          file:
+            path: "{{ r27_dir.path }}"
+            state: absent
+          when: r27_dir is defined and r27_dir.path is defined

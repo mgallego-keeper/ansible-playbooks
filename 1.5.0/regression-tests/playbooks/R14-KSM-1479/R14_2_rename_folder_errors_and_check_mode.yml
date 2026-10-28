@@ -1,0 +1,58 @@
+# R14.2: keeper_update_folder fails clearly on a nonexistent folder_uid, and check mode
+# reports changed without renaming the real folder (KSM-1479).
+- name: "R14.2: keeper_update_folder negative + check-mode cases"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    folder_name: "R14-KSM-1479 Check Mode Folder"
+
+  tasks:
+    - name: Rename a folder_uid that does not exist
+      keeper_update_folder:
+        folder_uid: "NONEXISTENT_FOLDER_UID_000000"
+        new_folder_name: "Should Never Apply"
+      register: missing
+      ignore_errors: true
+
+    - name: Assert a clear failure for the missing folder
+      assert:
+        that:
+          - missing is failed
+          - "'was not found, or it is not shared to this KSM application' in missing.msg"
+        success_msg: "PASS [R14.2]: Clear failure — {{ missing.msg }}"
+        fail_msg: "FAIL [R14.2]: {{ missing }}"
+
+    - name: Create or reuse the check-mode fixture folder
+      keeper_create_folder:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        folder_name: "{{ folder_name }}"
+      register: fixture_folder
+
+    - name: Rename in check mode
+      keeper_update_folder:
+        folder_uid: "{{ fixture_folder.folder_uid }}"
+        new_folder_name: "Should Not Apply"
+      register: check_mode_result
+      check_mode: true
+
+    - name: Assert check mode reports changed
+      assert:
+        that:
+          - check_mode_result.changed == true
+        success_msg: "PASS [R14.2]: check_mode reported changed=true"
+        fail_msg: "FAIL [R14.2]: {{ check_mode_result }}"
+
+    - name: Verify the real folder name is unaffected
+      keeper_get_folder:
+        subfolder_uid: "{{ fixture_folder.folder_uid }}"
+      register: verify
+
+    - name: Assert the name in the Vault did not change
+      assert:
+        that:
+          - verify.folder_name == folder_name
+        success_msg: "PASS [R14.2]: Vault name unchanged — still '{{ verify.folder_name }}'"
+        fail_msg: "FAIL [R14.2]: Vault name changed to '{{ verify.folder_name }}' during check mode"

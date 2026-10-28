@@ -1,0 +1,70 @@
+---
+# R27.1: the Python package and its requirements file no longer declare ansible-core, and the
+# Galaxy collection still declares the supported range (KSM-1649).
+#
+# ansible-core is GPL-3.0-or-later. Before the fix setup.py and requirements.txt listed
+# `ansible-core>=2.15.13,!=2.17.*`, so `pip install keeper-secrets-manager-ansible` installed it
+# and the release SBOM listed it. After the fix the package leaves it out and the collection
+# (meta/runtime.yml requires_ansible) and the README state the range instead.
+#
+# What this does: reads setup.py, requirements.txt, the collection requirements.txt, the
+# collection meta/runtime.yml and the README from repo_path. It checks
+# the install_requires list and both requirements files hold no ansible requirement, that
+# runtime.yml still says '>=2.15.13,!=2.17.*', and that the README names the same range.
+# It changes nothing.
+- name: "R27.1: package metadata leaves ansible-core out, collection keeps the supported range"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    r27_range: ">=2.15.13,!=2.17.*"
+    r27_pkg: "{{ repo_path }}"
+    r27_coll: "{{ repo_path }}/ansible_galaxy/keepersecurity/keeper_secrets_manager"
+    r27_setup: "{{ lookup('file', r27_pkg ~ '/setup.py') }}"
+    # The text of the install_requires list only, so the explanatory comment above it does not count.
+    r27_install_requires: "{{ r27_setup | regex_search('(?s)install_requires\\s*=\\s*\\[(.*?)\\]', '\\1') | first }}"
+
+  tasks:
+    - name: Assert the setup.py install_requires list names no ansible package
+      assert:
+        that:
+          - r27_install_requires | length > 0
+          - "'keeper-secrets-manager-core' in r27_install_requires"
+          - "'ansible' not in r27_install_requires"
+        success_msg: "PASS [R27.1a]: setup.py install_requires has the SDK requirements and no ansible requirement"
+        fail_msg: "FAIL [R27.1a]: setup.py install_requires = {{ r27_install_requires }}"
+
+    - name: Assert the package requirements.txt names no ansible package
+      assert:
+        that:
+          - >-
+            lookup('file', r27_pkg ~ '/requirements.txt').splitlines()
+            | reject('match', '^\s*(#|$)') | select('search', '(?i)ansible') | list | length == 0
+          - "'keeper-secrets-manager-core' in lookup('file', r27_pkg ~ '/requirements.txt')"
+        success_msg: "PASS [R27.1b]: package requirements.txt has no ansible requirement"
+        fail_msg: "FAIL [R27.1b]: package requirements.txt declares an ansible requirement"
+
+    - name: Assert the collection requirements.txt names no ansible package
+      assert:
+        that:
+          - >-
+            lookup('file', r27_coll ~ '/requirements.txt').splitlines()
+            | reject('match', '^\s*(#|$)') | select('search', '(?i)ansible') | list | length == 0
+        success_msg: "PASS [R27.1c]: collection requirements.txt has no ansible requirement"
+        fail_msg: "FAIL [R27.1c]: collection requirements.txt declares an ansible requirement"
+
+    - name: Assert the collection still declares the supported ansible-core range
+      assert:
+        that:
+          - (lookup('file', r27_coll ~ '/meta/runtime.yml') | from_yaml).requires_ansible == r27_range
+        success_msg: "PASS [R27.1d]: collection meta/runtime.yml requires_ansible is {{ r27_range }}"
+        fail_msg: "FAIL [R27.1d]: collection requires_ansible is {{ (lookup('file', r27_coll ~ '/meta/runtime.yml') | from_yaml).requires_ansible | default('missing') }}, expected {{ r27_range }}"
+
+    - name: Assert the README states the same range and says the package does not install ansible-core
+      assert:
+        that:
+          - "'ansible-core 2.15.13 or later' in lookup('file', r27_pkg ~ '/README.md')"
+          - "'does not install ansible-core' in lookup('file', r27_pkg ~ '/README.md')"
+        success_msg: "PASS [R27.1e]: README states the 2.15.13 floor and that the package does not install ansible-core"
+        fail_msg: "FAIL [R27.1e]: README no longer states the supported range or the install change"

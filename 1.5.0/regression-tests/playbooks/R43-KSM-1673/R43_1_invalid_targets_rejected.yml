@@ -1,0 +1,60 @@
+---
+# R43.1 (KSM-1673): keeper_create rejects an invalid shared-folder hierarchy in normal AND check mode.
+#
+# Before the fix, check mode previewed success for a subfolder under a different shared root and for a subfolder
+# supplied as shared_folder_uid; normal mode relied on the backend to refuse the payload. The hierarchy must now be
+# validated locally, before any payload is prepared or sent, so no record is created and no create request is made.
+# Needs variables: config_file, shared_folder_uid (shared root A), ksm1673_shared_b (a different shared root),
+# ksm1673_subfolder (a direct child of A).
+- name: "R43.1: Invalid record targets are rejected before any payload is sent"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  # Resolves keeper_create through the installed collection inside the EE; dev-mode plugin paths take over on the host.
+  collections:
+    - keepersecurity.keeper_secrets_manager
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    fake_uid: "AAAAAAAAAAAAAAAAAAAAAA"
+    cases:
+      - {id: cross_root, shared: "{{ ksm1673_shared_b }}", sub: "{{ ksm1673_subfolder }}", msg: "is not inside the shared folder"}
+      - {id: subfolder_as_root, shared: "{{ ksm1673_subfolder }}", sub: null, msg: "is a subfolder, not a shared folder"}
+      - {id: missing_root, shared: "{{ fake_uid }}", sub: null, msg: "folder key for {{ fake_uid }} not found"}
+      - {id: missing_subfolder, shared: "{{ shared_folder_uid }}", sub: "{{ fake_uid }}", msg: "was not found"}
+      - {id: root_as_subfolder, shared: "{{ shared_folder_uid }}", sub: "{{ shared_folder_uid }}", msg: "is not inside the shared folder"}
+
+  tasks:
+    - name: Freeze the run tag
+      set_fact:
+        tag: "R43.1-KSM1673-{{ now(fmt='%Y%m%d_%H%M%S') }}"
+
+    - name: Attempt each invalid target, in both modes
+      include_tasks: r43_attempt_tasks.yml
+      loop: "{{ cases | product(['normal', 'check']) | list }}"
+      loop_control: {loop_var: attempt, label: "{{ attempt.0.id }}-{{ attempt.1 }}"}
+
+    - name: Probe and remove anything this run created
+      command:
+        argv: ["{{ ansible_playbook_python }}", "{{ playbook_dir }}/R43_probe.py", "{{ keeper_config_file }}", "{{ tag }}", "--delete"]
+      environment:
+        KSM_CONFIG_SKIP_MODE_WARNING: "TRUE"
+      register: probe
+      changed_when: false
+
+    - name: Every invalid target fails with the hierarchy message in both modes
+      assert:
+        that:
+          - item.failed
+          - item.expected in item.msg
+        success_msg: "PASS [R43.1]: {{ item.id }} rejected ({{ item.mode }} mode)"
+        fail_msg: "FAIL [R43.1]: {{ item.id }} not rejected in {{ item.mode }} mode — {{ item.msg | default('no error') }}"
+      loop: "{{ outcomes }}"
+      loop_control: {label: "{{ item.id }}-{{ item.mode }}"}
+
+    - name: No record was created for any invalid target
+      assert:
+        that:
+          - (probe.stdout_lines[-1] | from_json | length) == 0
+        success_msg: "PASS [R43.1]: no record created by any invalid target"
+        fail_msg: "FAIL [R43.1]: invalid target created a record — {{ probe.stdout_lines[-1] }}"

@@ -1,0 +1,95 @@
+---
+# R6.4: Jinja2 {{ playbook_dir }} in keeper_cache_dir
+# Regression for KSM-781: _template_value() also applies to cache dir path
+# Source: 1.3.0/KSM-781/playbooks/03_ksm781_jinja2_cache_dir.yml
+
+- name: "R6.4: Jinja2 {{ playbook_dir }} in keeper_cache_dir"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    keeper_use_cache: "True"
+    cache_dir_base: "/tmp"
+    keeper_cache_dir: "{{ cache_dir_base }}/r9_4_cache"
+    keeper_record_cache_secret: "R94CacheTestSecret123!"
+    shared_folder_uid: "{{ shared_folder_uid }}"
+
+  tasks:
+    - name: Assert cache dir path resolved
+      assert:
+        that:
+          - keeper_cache_dir is not search('\{\{')
+        success_msg: "PASS [R6.4a]: Cache dir resolved to {{ keeper_cache_dir }}"
+        fail_msg: "FAIL [R6.4a]: Raw Jinja2 still in keeper_cache_dir: {{ keeper_cache_dir }}"
+
+    - name: Create cache directory at Jinja2-resolved path
+      file:
+        path: "/tmp/r9_4_cache"
+        state: directory
+        mode: '0700'
+
+    - name: Generate cache secret
+      keeper_password:
+        length: 64
+      register: cache_secret_gen
+      no_log: true
+
+    - name: Store cache secret
+      set_fact:
+        keeper_record_cache_secret: "{{ cache_secret_gen.password }}"
+      no_log: true
+
+    - name: Create test record for caching
+      keeper_create:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        record_type: login
+        title: "R6.4 Jinja2 Cache Dir Test - {{ now(fmt='%Y%m%d_%H%M%S') }}"
+        fields:
+          - type: login
+            value: "r9_4_cache_user"
+      register: created
+
+    - name: Cache the record (uses Jinja2-resolved cache_dir)
+      keeper_cache_records:
+        uids:
+          - "{{ created.record_uid }}"
+      register: cached
+      no_log: true
+
+    - name: Assert cache file created at resolved path
+      stat:
+        path: "/tmp/r9_4_cache/ksm_cache.bin"
+      register: cache_stat
+
+    - name: Assert cache file exists at Jinja2-resolved dir
+      assert:
+        that:
+          - cache_stat.stat.exists
+        success_msg: "PASS [R6.4b]: Cache file created at resolved Jinja2 path /tmp/r9_4_cache/"
+        fail_msg: "FAIL [R6.4b]: Cache file not found at /tmp/r9_4_cache/ — Jinja2 cache_dir not resolved"
+
+    - name: Read from cache using cache object
+      keeper_get:
+        cache: "{{ cached.cache }}"
+        uid: "{{ created.record_uid }}"
+        field: login
+      register: cached_get
+
+    - name: Assert cached read succeeded
+      assert:
+        that:
+          - cached_get.value == "r9_4_cache_user"
+        success_msg: "PASS [R6.4c]: keeper_get succeeded using Jinja2-resolved cache dir"
+        fail_msg: "FAIL [R6.4c]: keeper_get failed with Jinja2 cache_dir"
+
+    - name: Cleanup cache dir
+      file:
+        path: "/tmp/r9_4_cache"
+        state: absent
+
+    - name: Cleanup record
+      keeper_remove:
+        uid: "{{ created.record_uid }}"
+      ignore_errors: yes

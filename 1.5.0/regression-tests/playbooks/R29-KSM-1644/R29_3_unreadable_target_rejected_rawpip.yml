@@ -1,0 +1,98 @@
+---
+# R29.3: keeper_remove does not report an unreadable existing record as missing, raw pip / source-tree surface (KSM-1644).
+#
+# Same behavior check as R29.2, but it exercises the plain `keeper_secrets_manager_ansible` Python package (pip
+# install, editable install, or a source tree on PYTHONPATH) instead of the Galaxy collection. R29.2 imports
+# ansible_collections.keepersecurity.keeper_secrets_manager.*, so it cannot tell you whether the pip package is fixed.
+#
+# Before the fix remove_record() read the vault with get_secrets(), which leaves out any record the SDK cannot decrypt
+# or parse (for example a record with an attachment whose file key is invalid), and treated the empty list as "the
+# record is not there". keeper_remove answered changed=false, "The record was not found, or it is not shared to this
+# KSM application. Nothing was deleted." while the record stayed in the vault. After the fix it fails with an
+# unreadable-target message, and it will not pick a record by title when unreadable records make absence or
+# uniqueness unknowable. Genuine absence stays an idempotent no-op.
+#
+# An unreadable record cannot be made in a live vault, so this runs the real SDK (keeper-secrets-manager-core) against
+# the repo's UnreadableRecordServer, a stand-in for the server that returns real encrypted records plus one the SDK
+# omits. kt_unreadable_rawpip.py imports the package from the same interpreter that runs ansible-playbook, and R29.3a
+# asserts that the imported package is NOT inside an ansible_collections tree, so a collection that shadows the source
+# cannot make this pass for the wrong reason. Run it with an EMPTY ANSIBLE_COLLECTIONS_PATH.
+# Needs repo_path: integration/keeper_secrets_manager_ansible, for the stand-in server only.
+# Creates nothing in any vault. Expected to FAIL against a package built before the fix.
+- name: "R29.3: raw pip keeper_remove rejects an unreadable target and keeps genuine-absence idempotency"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    r29_not_found: "The record was not found, or it is not shared to this KSM application. Nothing was deleted."
+
+  tasks:
+    - name: Run remove_record from the pip package against the real SDK
+      command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - "{{ playbook_dir }}/kt_unreadable_rawpip.py"
+          - "{{ repo_path }}"
+      environment:
+        OBJC_DISABLE_INITIALIZE_FORK_SAFETY: "YES"
+        no_proxy: "*"
+      register: r29_run
+      changed_when: false
+
+    - name: Parse the cases
+      set_fact:
+        r29_package_file: "{{ (r29_run.stdout | from_json).package_file }}"
+        r29_unreadable: "{{ (r29_run.stdout | from_json).cases | selectattr('selector.uids', 'defined') | selectattr('selector.uids', 'equalto', 'RECORD_UID') | list }}"
+        r29_title: "{{ (r29_run.stdout | from_json).cases | selectattr('selector.titles', 'defined') | list }}"
+        r29_missing: "{{ (r29_run.stdout | from_json).cases | selectattr('selector.uids', 'defined') | selectattr('selector.uids', 'equalto', 'MISSING_UID') | list }}"
+        r29_other: "{{ (r29_run.stdout | from_json).cases | selectattr('selector.uids', 'defined') | selectattr('selector.uids', 'equalto', 'OTHER_UID') | list }}"
+
+    - name: Assert the code under test is the pip package, not the Galaxy collection
+      assert:
+        that:
+          - r29_package_file is search('keeper_secrets_manager_ansible/__init__.py$')
+          - r29_package_file is not search('ansible_collections')
+        success_msg: "PASS [R29.3a]: tested the pip package at {{ r29_package_file }}"
+        fail_msg: "FAIL [R29.3a]: the code under test is not the plain pip package: {{ r29_package_file }}"
+
+    - name: Assert all 4 unreadable faults, normal and check mode, fail with the unreadable diagnostic and delete nothing
+      assert:
+        that:
+          - r29_unreadable | length == 8
+          - r29_unreadable | selectattr('outcome.error', 'defined') | list | length == 8
+          - r29_unreadable | map(attribute='outcome.error') | select('search', 'The requested record UID\(s\) RECORD_UID exist, but are unreadable by keeper-secrets-manager-core. Nothing was deleted.') | list | length == 8
+          - r29_unreadable | map(attribute='delete_requests') | map('length') | sum == 0
+          - r29_unreadable | selectattr('target_still_in_server') | list | length == 8
+        success_msg: "PASS [R29.3b]: unreadable target fails with 'exist, but are unreadable ... Nothing was deleted.' for attachment/record_data/folder_key/folder_peer, in normal and check mode, zero delete requests"
+        fail_msg: "FAIL [R29.3b]: an unreadable target was not rejected: {{ r29_unreadable | map(attribute='outcome') | list }}"
+
+    - name: Assert title selection refuses to decide when unreadable records exist
+      assert:
+        that:
+          - r29_title | length == 2
+          - r29_title | map(attribute='outcome.error') | select('search', 'Cannot select a record by title because keeper-secrets-manager-core returned unreadable records or folders') | list | length == 2
+          - r29_title | map(attribute='delete_requests') | map('length') | sum == 0
+        success_msg: "PASS [R29.3c]: title selection fails ('Absence and uniqueness cannot be confirmed') in normal and check mode, nothing deleted"
+        fail_msg: "FAIL [R29.3c]: title selection did not refuse: {{ r29_title | map(attribute='outcome') | list }}"
+
+    - name: Assert genuine absence is still an idempotent no-op even though an unreadable record exists elsewhere
+      assert:
+        that:
+          - r29_missing | length == 2
+          - r29_missing | map(attribute='outcome.result.changed') | unique | list == [false]
+          - r29_missing | map(attribute='outcome.result.msg') | unique | list == [r29_not_found]
+          - r29_missing | map(attribute='delete_requests') | map('length') | sum == 0
+        success_msg: "PASS [R29.3d]: a UID that does not exist still returns changed=false with the original not-found message"
+        fail_msg: "FAIL [R29.3d]: genuine absence is no longer idempotent: {{ r29_missing | map(attribute='outcome') | list }}"
+
+    - name: Assert a readable record next to an unreadable one still removes (normal) and predicts (check mode)
+      assert:
+        that:
+          - r29_other | length == 2
+          - r29_other | map(attribute='outcome.result.changed') | unique | list == [true]
+          - r29_other | map(attribute='outcome.result.record_uid') | unique | list == ['OTHER_UID']
+          - (r29_other | rejectattr('check_mode') | first).delete_requests == [['OTHER_UID']]
+          - (r29_other | selectattr('check_mode') | first).delete_requests == []
+        success_msg: "PASS [R29.3e]: readable OTHER_UID is deleted in a normal run (one delete request) and only predicted in check mode (zero)"
+        fail_msg: "FAIL [R29.3e]: readable record behavior changed: {{ r29_other }}"

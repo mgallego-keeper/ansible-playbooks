@@ -1,0 +1,74 @@
+---
+# This separate LIVE test requires ee_keeper_live_connectivity=true and an AWX
+# custom credential injecting initialized JSON through the KSM_CONFIG variable.
+# Do not provide a one-time token or put configuration into project files.
+- name: Verify read-only Keeper connectivity from the Controller execution environment
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  no_log: true
+
+  vars:
+    ee_keeper_expected_server: keepersecurity.com
+
+  tasks:
+    - name: Require explicit live Keeper connectivity opt-in
+      ansible.builtin.assert:
+        that:
+          - ee_keeper_live_connectivity | default(false) | bool
+        quiet: true
+        fail_msg: Live Keeper connectivity must be explicitly enabled
+      no_log: true
+
+    - name: Run the read-only Keeper probe under the Ansible interpreter
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - "{{ playbook_dir }}/ee_keeper_connectivity.py"
+          - --expected-server
+          - "{{ ee_keeper_expected_server }}"
+      register: ee_keeper_probe
+      changed_when: false
+      failed_when: false
+      no_log: true
+
+    - name: Require a successful bounded probe response
+      ansible.builtin.assert:
+        that:
+          - ee_keeper_probe.rc == 0
+          - ee_keeper_probe.stdout | length > 0
+          - ee_keeper_probe.stdout | length <= 512
+          - ee_keeper_probe.stderr | length == 0
+        quiet: true
+        fail_msg: Live Keeper probe did not return a successful bounded report
+      no_log: true
+
+    - name: Parse the bounded report without displaying task output
+      ansible.builtin.set_fact:
+        ee_keeper_safe_report: "{{ ee_keeper_probe.stdout | from_json }}"
+      no_log: true
+
+    - name: Validate the exact non-sensitive report schema
+      ansible.builtin.assert:
+        that:
+          - ee_keeper_safe_report is mapping
+          - ee_keeper_safe_report.keys() | list | sort == ['passed', 'record_count', 'server']
+          - ee_keeper_safe_report.passed is sameas true
+          - ee_keeper_safe_report.server is string
+          - ee_keeper_safe_report.server == ee_keeper_expected_server
+          - ee_keeper_safe_report.server | length <= 253
+          - >-
+            ee_keeper_safe_report.server is
+            match('(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}\Z')
+          - ee_keeper_safe_report.record_count is integer
+          - ee_keeper_safe_report.record_count is not boolean
+          - ee_keeper_safe_report.record_count >= 0
+          - ee_keeper_safe_report.record_count <= 2147483647
+        quiet: true
+        fail_msg: Live Keeper probe returned an invalid safe report
+      no_log: true
+
+    - name: Show only the validated Keeper connectivity summary
+      ansible.builtin.debug:
+        msg: "{{ ee_keeper_safe_report }}"
+      no_log: false

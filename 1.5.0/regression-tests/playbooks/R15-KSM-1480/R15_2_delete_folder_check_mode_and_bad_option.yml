@@ -1,0 +1,62 @@
+# R15.2: keeper_delete_folder's check mode reports changed without deleting, and the
+# misspelled option "force" (not "force_deletion") is rejected (KSM-1480).
+- name: "R15.2: keeper_delete_folder check mode + bad option"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    folder_name: "R15-KSM-1480 Regression Check/BadOption"
+
+  tasks:
+    - name: Create the fixture folder
+      keeper_create_folder:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        folder_name: "{{ folder_name }}"
+      register: fixture_folder
+
+    - name: Delete in check mode
+      keeper_delete_folder:
+        folder_uid: "{{ fixture_folder.folder_uid }}"
+      register: check_result
+      check_mode: true
+
+    - name: Assert check mode reports changed
+      assert:
+        that:
+          - check_result.changed == true
+        success_msg: "PASS [R15.2]: check_mode reported changed=true"
+        fail_msg: "FAIL [R15.2]: {{ check_result }}"
+
+    - name: Verify the folder still exists after check mode
+      keeper_get_folder:
+        subfolder_uid: "{{ fixture_folder.folder_uid }}"
+      register: verify
+
+    - name: Assert the folder was not actually deleted
+      assert:
+        that:
+          - verify.folder_uid == fixture_folder.folder_uid
+        success_msg: "PASS [R15.2]: Folder still exists after check mode"
+        fail_msg: "FAIL [R15.2]: {{ verify }}"
+
+    - name: Delete with the wrong option name
+      keeper_delete_folder:
+        folder_uid: "{{ fixture_folder.folder_uid }}"
+        force: true
+      register: bad_option
+      ignore_errors: true
+
+    - name: Assert the task failed naming the unsupported parameter
+      assert:
+        that:
+          - bad_option is failed
+          - "'Unsupported parameters for (keeper_delete_folder) module: force' in bad_option.msg"
+        success_msg: "PASS [R15.2]: Rejected — {{ bad_option.msg }}"
+        fail_msg: "FAIL [R15.2]: {{ bad_option }}"
+
+    - name: Clean up the fixture folder for real
+      keeper_delete_folder:
+        folder_uid: "{{ fixture_folder.folder_uid }}"
+      ignore_errors: true

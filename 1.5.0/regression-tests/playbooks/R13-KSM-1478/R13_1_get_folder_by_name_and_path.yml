@@ -1,0 +1,45 @@
+# R13.1: keeper_get_folder resolves a subfolder by name and by folder_path, and returns
+# the start folder itself when no name/path is given (KSM-1478).
+- name: "R13.1: keeper_get_folder lookup by name and path"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    folder_name: "R13-KSM-1478 Regression Folder"
+
+  tasks:
+    - name: Create or reuse the regression folder
+      keeper_create_folder:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        folder_name: "{{ folder_name }}"
+      register: created_folder
+
+    - name: Look up the folder by shared_folder_uid + folder_name
+      keeper_get_folder:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        folder_name: "{{ folder_name }}"
+      register: by_name
+
+    - name: Assert the lookup resolves to the created folder
+      assert:
+        that:
+          - by_name.changed == false
+          - by_name.folder_uid == created_folder.folder_uid
+          - by_name.parent_uid == shared_folder_uid
+        success_msg: "PASS [R13.1]: Resolved by name to {{ by_name.folder_uid }}"
+        fail_msg: "FAIL [R13.1]: {{ by_name }}"
+
+    - name: Look up the same folder by folder_path, with no UID option
+      keeper_get_folder:
+        folder_path: "{{ shared_folder_name }}/{{ folder_name }}"
+      register: by_path
+
+    - name: Assert the path lookup resolves to the same folder
+      assert:
+        that:
+          - by_path.folder_uid == created_folder.folder_uid
+          - by_path.shared_folder_uid == shared_folder_uid
+        success_msg: "PASS [R13.1]: Resolved by path to {{ by_path.folder_uid }}"
+        fail_msg: "FAIL [R13.1]: {{ by_path }}"

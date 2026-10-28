@@ -1,0 +1,34 @@
+---
+# Inner playbook for R28.2. Not a test by itself (the runner skips it). The outer playbook
+# runs it with keeper_redact as the stdout callback and inspects what it printed.
+# Expects -e: keeper_config_file, kt_uid, and the connection settings the real run passes:
+# kt_token, kt_cache_secret (made-up values, to be masked when printed).
+- name: "KSM-1638 inner: read a record and print the settings with them set"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
+
+  vars:
+    keeper_token: "{{ kt_token }}"
+    keeper_record_cache_secret: "{{ kt_cache_secret }}"
+
+  tasks:
+    - name: keeper_get the password field
+      keeper_get:
+        uid: "{{ kt_uid }}"
+        field: password
+      register: kt_got
+
+    - name: keeper_get_record the whole record
+      keeper_get_record:
+        uid: "{{ kt_uid }}"
+      register: kt_rec
+
+    - name: debug the result and the settings
+      debug:
+        msg:
+          got: "{{ kt_got }}"
+          keeper_token: "{{ keeper_token }}"
+          keeper_record_cache_secret: "{{ keeper_record_cache_secret }}"

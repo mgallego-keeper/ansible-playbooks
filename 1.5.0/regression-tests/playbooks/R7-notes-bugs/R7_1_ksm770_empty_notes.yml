@@ -1,0 +1,102 @@
+---
+# R7.1: KSM-770 regression — get_field_type_enum_and_key() field_key fix
+#
+# Bug: notes: yes caused field_key=True (boolean) instead of field_key=None.
+# Symptoms:
+#   - keeper_get with notes: yes on record with NO notes → "Cannot find key True"
+#   - keeper_get with notes: yes + field: X → accepted (should be rejected)
+# Fix: field_key = None if key == "notes" else args.get(key)
+#
+# Source: 1.3.0/KSM-772/playbooks/06_notes_bug_verification.yml (KSM-770 section)
+
+- name: "R7.1: KSM-770 — notes field_key regression"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+
+  tasks:
+    # Setup: two records — one with notes, one without
+    - name: Create record WITHOUT notes
+      keeper_create:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        record_type: login
+        title: "R7.1 No-Notes Record - {{ now(fmt='%Y%m%d_%H%M%S') }}"
+        fields:
+          - type: login
+            value: "r10_1_no_notes_user"
+          - type: password
+            value: "TestPwd123!"
+      register: no_notes_record
+
+    - name: Create record WITH notes
+      keeper_create:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        record_type: login
+        title: "R7.1 Has-Notes Record - {{ now(fmt='%Y%m%d_%H%M%S') }}"
+        fields:
+          - type: login
+            value: "r10_1_has_notes_user"
+          - type: password
+            value: "TestPwd456!"
+        notes: "original notes for KSM-770 test"
+      register: has_notes_record
+
+    # KSM-770 Test 1: notes: yes on record with NO notes must not produce "Cannot find key True"
+    - name: "KSM-770.1 — keeper_get notes: yes on record with no notes"
+      keeper_get:
+        uid: "{{ no_notes_record.record_uid }}"
+        notes: yes
+      register: ksm770_no_notes
+      ignore_errors: true
+
+    - name: "KSM-770.1 — Assert no 'Cannot find key True' error"
+      assert:
+        that:
+          - "'Cannot find key True' not in (ksm770_no_notes.msg | default(''))"
+          - "'key True' not in (ksm770_no_notes.msg | default(''))"
+        success_msg: "PASS [R7.1a]: No 'Cannot find key True' error — KSM-770 fix confirmed"
+        fail_msg: "FAIL [R7.1a]: KSM-770 REGRESSION — 'key True' appeared in error: {{ ksm770_no_notes.msg | default('') }}"
+
+    # KSM-770 Test 2: notes: yes on record WITH notes must succeed and return correct value
+    - name: "KSM-770.2 — keeper_get notes: yes on record with notes (sanity)"
+      keeper_get:
+        uid: "{{ has_notes_record.record_uid }}"
+        notes: yes
+      register: ksm770_has_notes
+
+    - name: "KSM-770.2 — Assert notes retrieved correctly"
+      assert:
+        that:
+          - ksm770_has_notes is not failed
+          - ksm770_has_notes.value == "original notes for KSM-770 test"
+        success_msg: "PASS [R7.1b]: Notes retrieved correctly — field_key=None did not break retrieval"
+        fail_msg: "FAIL [R7.1b]: Notes not retrieved — got '{{ ksm770_has_notes.value | default('') }}'"
+
+    # KSM-770 Test 3: mutual exclusion — notes: yes + field: password must be rejected
+    - name: "KSM-770.3 — notes: yes + field: password must error (mutual exclusion)"
+      keeper_get:
+        uid: "{{ has_notes_record.record_uid }}"
+        notes: yes
+        field: password
+      register: ksm770_mutual
+      ignore_errors: true
+
+    - name: "KSM-770.3 — Assert mutual exclusion is enforced"
+      assert:
+        that:
+          - ksm770_mutual is failed
+          - "'multiple' in (ksm770_mutual.msg | default('')) or 'Found' in (ksm770_mutual.msg | default(''))"
+        success_msg: "PASS [R7.1c]: Mutual exclusion correctly rejects notes + field combo"
+        fail_msg: "FAIL [R7.1c]: Mutual exclusion not enforced for notes + field"
+
+    # Cleanup
+    - name: Cleanup
+      keeper_remove:
+        uid: "{{ item }}"
+      loop:
+        - "{{ no_notes_record.record_uid }}"
+        - "{{ has_notes_record.record_uid }}"
+      ignore_errors: yes

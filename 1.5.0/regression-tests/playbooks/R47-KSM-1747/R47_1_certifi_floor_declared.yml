@@ -1,0 +1,37 @@
+---
+# R47.1 (KSM-1747): all four Ansible installation surfaces must declare certifi>=2026.10.19 exactly once,
+# unconditionally (no URL, environment marker, or extras), so an installed certifi 2026.7.22 cannot satisfy the requirements.
+# Reads repo files only; no vault access, no state change. Needs repo_path.
+- name: "R47.1: certifi floor declared on every installation surface"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    base: "{{ repo_path }}"
+    surfaces:
+      - "{{ base }}/setup.py"
+      - "{{ base }}/requirements.txt"
+      - "{{ base }}/ansible_galaxy/keepersecurity/keeper_secrets_manager/requirements.txt"
+      - "{{ base }}/ansible_galaxy/tower_execution_environment/requirements.txt"
+
+  tasks:
+    - name: Collect certifi lines from each surface
+      shell: "grep -i 'certifi' '{{ item }}' | grep -v '^[[:space:]]*#' || true"
+      loop: "{{ surfaces }}"
+      register: lines
+      changed_when: false
+
+    - name: Verify exactly one unconditional floor per surface
+      assert:
+        that:
+          - (item.stdout_lines | length) == 1
+          - (item.stdout_lines[0] | trim | trim("',") | trim) == 'certifi>=2026.10.19'
+          - "'@' not in item.stdout_lines[0]"
+          - "';' not in item.stdout_lines[0]"
+          - "'[' not in item.stdout_lines[0]"
+        success_msg: "PASS [R47.1]: {{ item.item | basename }} declares certifi>=2026.10.19 once, unconditionally"
+        fail_msg: "FAIL [R47.1]: {{ item.item }} certifi lines: {{ item.stdout_lines }}"
+      loop: "{{ lines.results }}"
+      loop_control:
+        label: "{{ item.item | basename }}"

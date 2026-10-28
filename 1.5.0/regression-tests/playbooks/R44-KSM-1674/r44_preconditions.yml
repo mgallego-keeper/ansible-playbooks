@@ -1,0 +1,31 @@
+---
+# Included by R44_1 and R44_2. Fails with a clear message when the seeded folder tree is missing or mismatched.
+# Expects these play vars: r44_names (folder UID var -> expected folder name). Run create_seed_records.yml to create the tree.
+- name: Check that the folder UID vars are set
+  assert:
+    that:
+      - (lookup('vars', item, default='') | string | length) > 0
+      - "'REPLACE' not in (lookup('vars', item, default='') | string)"
+    fail_msg: >-
+      {{ item }} is not set as a variable. Run create_seed_records.yml and set the printed values
+      (ksm1673_shared_b is a second shared folder that you create by hand).
+  loop: "{{ r44_names.keys() | list + ['shared_folder_uid', 'shared_folder_name', 'ksm1673_shared_b'] }}"
+
+- name: Look up each seeded folder by UID
+  keeper_get_folder:
+    subfolder_uid: "{{ lookup('vars', item) }}"
+  loop: "{{ r44_names.keys() | list }}"
+  register: r44_seeded
+  ignore_errors: true
+
+- name: Check that each UID is the folder that the lookups expect
+  assert:
+    that:
+      - item is not failed
+      - item.folder_name == r44_names[item.item]
+    fail_msg: >-
+      {{ item.item }} should be the folder "{{ r44_names[item.item] }}" but is
+      {{ ('"' ~ item.folder_name ~ '"') if item is not failed else 'not readable (' ~ (item.msg | default('')) ~ ')' }}.
+      Run create_seed_records.yml, or point {{ item.item }} at that folder.
+  loop: "{{ r44_seeded.results }}"
+  loop_control: {label: "{{ item.item }}"}

@@ -1,0 +1,47 @@
+---
+# R32.3: the keeper_create_folder name validation unit tests pass (KSM-1647).
+#
+# Before the fix, keeper_create_folder sent any folder_name to the vault as it was: a number, boolean, list or
+# dictionary, a blank name, or a name with leading or trailing whitespace (such as the newline that a YAML
+# block scalar keeps) created a malformed folder, and a repeat run created another one.
+#
+# Run it with: -e repo_path=<integration/keeper_secrets_manager_ansible directory of the code under test>
+# The Python that runs ansible-playbook needs pytest and the keeper-secrets-manager-core package.
+#
+# Raw pip / local surface note: set ANSIBLE_COLLECTIONS_PATH to an EMPTY directory so that a stale collection
+# under ~/.ansible/collections cannot shadow the code under test. The tests import the plugin from repo_path.
+#
+# What this does: runs tests/unit/plugins/action/test_keeper_create_folder_names.py and
+# test_keeper_create_folder.py from repo_path. They assert, in normal and check mode, the exact error text for
+# every non-string and padded name, that the Keeper client is never initialized for them (no vault request),
+# and that valid names (including quoted "No", "0", "2024", strip-chomped block scalars and Ansible Vault values)
+# create once and are idempotent on repeat against an in-process fake server. Nothing touches the vault.
+- name: "R32.3: unit tests for folder name validation pass"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Run the keeper_create_folder name tests
+      command: >-
+        env -u ANSIBLE_CONFIG {{ ansible_playbook_python }} -m pytest
+        tests/unit/plugins/action/test_keeper_create_folder_names.py
+        tests/unit/plugins/action/test_keeper_create_folder.py
+        -q -p no:cacheprovider
+      args:
+        chdir: "{{ repo_path }}"
+      environment:
+        PYTHONDONTWRITEBYTECODE: "1"
+        KSM_CONFIG_SKIP_MODE_WARNING: "TRUE"
+      register: r32_unit
+      changed_when: false
+      failed_when: false
+
+    - name: Assert the tests ran and all passed
+      assert:
+        that:
+          - r32_unit.rc == 0
+          - "' passed' in r32_unit.stdout"
+          - "' failed' not in r32_unit.stdout"
+        success_msg: "PASS [R32.3]: {{ (r32_unit.stdout_lines | default([]) | last | default('')) }}"
+        fail_msg: "FAIL [R32.3]: rc={{ r32_unit.rc }} {{ (r32_unit.stdout_lines | default([]) | last | default('')) }} {{ (r32_unit.stderr_lines | default([]) | last | default('')) }} (the Python that runs ansible-playbook needs pytest and the packages in repo_path/requirements.txt: pip install pytest)"

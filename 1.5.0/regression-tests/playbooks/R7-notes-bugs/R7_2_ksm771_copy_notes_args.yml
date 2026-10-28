@@ -1,0 +1,111 @@
+---
+# R7.2: KSM-771 regression — keeper_copy must pop "notes" from task args
+#
+# Bug: "notes" param was left in self._task.args and passed to the built-in
+#      copy module, which rejected it with "Unsupported parameters: notes".
+# Fix: self._task.args.pop("notes", None) added before delegating to copy.
+#
+# Source: 1.3.0/KSM-772/playbooks/06_notes_bug_verification.yml (KSM-771 section)
+
+- name: "R7.2: KSM-771 — keeper_copy notes args cleanup regression"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    output_dir: "/tmp/r10_2_copy_test"
+
+  tasks:
+    - name: Ensure output dir exists
+      file:
+        path: "{{ output_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Create record with notes
+      keeper_create:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        record_type: login
+        title: "R7.2 Copy Notes Test - {{ now(fmt='%Y%m%d_%H%M%S') }}"
+        fields:
+          - type: login
+            value: "r10_2_copy_user"
+          - type: password
+            value: "CopyTestPwd!"
+        notes: "notes for KSM-771 copy test"
+      register: record
+
+    # KSM-771 Test 1: basic copy notes — must not produce "Unsupported parameters: notes"
+    - name: "KSM-771.1 — keeper_copy with notes: yes (basic)"
+      keeper_copy:
+        uid: "{{ record.record_uid }}"
+        notes: yes
+        dest: "{{ output_dir }}/notes_basic.txt"
+      register: copy_basic
+
+    - name: "KSM-771.1 — Assert no 'Unsupported parameters' error"
+      assert:
+        that:
+          - copy_basic is not failed
+        success_msg: "PASS [R7.2a]: keeper_copy notes: yes succeeded — no 'Unsupported parameters' error"
+        fail_msg: "FAIL [R7.2a]: KSM-771 REGRESSION — {{ copy_basic.msg | default('') }}"
+
+    - name: "KSM-771.1 — Verify file content matches notes"
+      slurp:
+        src: "{{ output_dir }}/notes_basic.txt"
+      register: basic_content
+
+    - name: "KSM-771.1 — Assert content correct"
+      assert:
+        that:
+          - (basic_content.content | b64decode) == "notes for KSM-771 copy test"
+        success_msg: "PASS [R7.2b]: File content matches notes exactly"
+        fail_msg: "FAIL [R7.2b]: Content '{{ basic_content.content | b64decode }}' != expected"
+
+    # KSM-771 Test 2: copy notes with mode — permissions must survive args cleanup
+    - name: "KSM-771.2 — keeper_copy notes: yes with mode 0600"
+      keeper_copy:
+        uid: "{{ record.record_uid }}"
+        notes: yes
+        dest: "{{ output_dir }}/notes_secure.txt"
+        mode: '0600'
+
+    - name: "KSM-771.2 — Verify mode preserved after notes arg cleanup"
+      stat:
+        path: "{{ output_dir }}/notes_secure.txt"
+      register: secure_stat
+
+    - name: "KSM-771.2 — Assert mode 0600 preserved"
+      assert:
+        that:
+          - secure_stat.stat.mode == '0600'
+        success_msg: "PASS [R7.2c]: mode=0600 preserved after notes arg cleanup"
+        fail_msg: "FAIL [R7.2c]: mode was {{ secure_stat.stat.mode }} instead of 0600"
+
+    # KSM-771 Test 3: copy notes with backup — notes cleaned from backup code path too
+    - name: "KSM-771.3 — keeper_copy notes: yes with backup: true"
+      keeper_copy:
+        uid: "{{ record.record_uid }}"
+        notes: yes
+        dest: "{{ output_dir }}/notes_basic.txt"
+        backup: true
+      register: copy_backup
+
+    - name: "KSM-771.3 — Assert copy with backup + notes succeeded"
+      assert:
+        that:
+          - copy_backup is not failed
+        success_msg: "PASS [R7.2d]: Copy with backup + notes succeeded"
+        fail_msg: "FAIL [R7.2d]: Copy with backup + notes failed — {{ copy_backup.msg | default('') }}"
+
+    # Cleanup
+    - name: Remove output dir
+      file:
+        path: "{{ output_dir }}"
+        state: absent
+
+    - name: Cleanup record
+      keeper_remove:
+        uid: "{{ record.record_uid }}"
+      ignore_errors: yes

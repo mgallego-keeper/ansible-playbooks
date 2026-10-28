@@ -1,0 +1,162 @@
+---
+# R7.3: KSM-772 regression — set_value() must use value param, not key (None)
+#
+# Bug: set_value() did record.dict["notes"] = key (which is None after KSM-770
+#      fix) instead of record.dict["notes"] = value.
+# Fix: record.dict["notes"] = value
+#
+# Symptoms: keeper_set notes: yes → value stored as None, read back as None/empty
+#
+# Source: 1.3.0/KSM-772/playbooks/06_notes_bug_verification.yml (KSM-772 section)
+
+- name: "R7.3: KSM-772 — keeper_set notes value round-trip regression"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+
+  tasks:
+    - name: Create record WITH existing notes
+      keeper_create:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        record_type: login
+        title: "R7.3 Set Notes Test (has notes) - {{ now(fmt='%Y%m%d_%H%M%S') }}"
+        fields:
+          - type: login
+            value: "r10_3_set_user"
+          - type: password
+            value: "SetTestPwd!"
+        notes: "original notes"
+      register: has_notes_record
+
+    - name: Create record WITHOUT notes
+      keeper_create:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        record_type: login
+        title: "R7.3 Set Notes Test (no notes) - {{ now(fmt='%Y%m%d_%H%M%S') }}"
+        fields:
+          - type: login
+            value: "r10_3_no_notes_user"
+          - type: password
+            value: "SetTestPwd2!"
+      register: no_notes_record
+
+    # KSM-772 Test 1: set + read round-trip — value must be the string, not None
+    - name: "KSM-772.1 — Set notes on record that has existing notes"
+      keeper_set:
+        uid: "{{ has_notes_record.record_uid }}"
+        notes: yes
+        value: "updated by KSM-772 test"
+
+    - name: "KSM-772.1 — Wait for propagation"
+      pause:
+        seconds: 3
+
+    - name: "KSM-772.1 — Read back notes"
+      keeper_get:
+        uid: "{{ has_notes_record.record_uid }}"
+        notes: yes
+      register: readback_1
+
+    - name: "KSM-772.1 — Assert value is the string, NOT None"
+      assert:
+        that:
+          - readback_1.value is defined
+          - readback_1.value == "updated by KSM-772 test"
+          - readback_1.value != ""
+          - readback_1.value != "None"
+        success_msg: "PASS [R7.3a]: Notes set correctly — got '{{ readback_1.value }}'"
+        fail_msg: "FAIL [R7.3a]: KSM-772 REGRESSION — value was '{{ readback_1.value | default('None/undefined') }}' instead of 'updated by KSM-772 test'"
+
+    # KSM-772 Test 2: set notes on record that NEVER had notes
+    - name: "KSM-772.2 — Set notes on record that never had notes"
+      keeper_set:
+        uid: "{{ no_notes_record.record_uid }}"
+        notes: yes
+        value: "first notes ever"
+
+    - name: "KSM-772.2 — Wait for propagation"
+      pause:
+        seconds: 3
+
+    - name: "KSM-772.2 — Read back first-ever notes"
+      keeper_get:
+        uid: "{{ no_notes_record.record_uid }}"
+        notes: yes
+      register: readback_2
+
+    - name: "KSM-772.2 — Assert first-ever notes stored correctly"
+      assert:
+        that:
+          - readback_2.value == "first notes ever"
+        success_msg: "PASS [R7.3b]: First-ever notes set and retrieved correctly"
+        fail_msg: "FAIL [R7.3b]: First-ever notes stored as '{{ readback_2.value | default('None') }}'"
+
+    # KSM-772 Test 3: overwrite notes — second set must replace, not corrupt
+    - name: "KSM-772.3 — Overwrite notes (second set)"
+      keeper_set:
+        uid: "{{ has_notes_record.record_uid }}"
+        notes: yes
+        value: "overwritten value"
+
+    - name: "KSM-772.3 — Wait for propagation"
+      pause:
+        seconds: 3
+
+    - name: "KSM-772.3 — Read back overwritten notes"
+      keeper_get:
+        uid: "{{ has_notes_record.record_uid }}"
+        notes: yes
+      register: readback_3
+
+    - name: "KSM-772.3 — Assert overwrite persisted"
+      assert:
+        that:
+          - readback_3.value == "overwritten value"
+        success_msg: "PASS [R7.3c]: Notes overwrite persisted correctly"
+        fail_msg: "FAIL [R7.3c]: Overwrite stored '{{ readback_3.value | default('None') }}' instead of 'overwritten value'"
+
+    # KSM-772 Test 4: set→copy round-trip (combines KSM-772 set with KSM-771 copy)
+    - name: "KSM-772.4 — Set notes then copy to file (combined round-trip)"
+      keeper_set:
+        uid: "{{ has_notes_record.record_uid }}"
+        notes: yes
+        value: "value for copy verification"
+
+    - name: "KSM-772.4 — Wait for propagation"
+      pause:
+        seconds: 3
+
+    - name: "KSM-772.4 — Copy just-set notes to file"
+      keeper_copy:
+        uid: "{{ has_notes_record.record_uid }}"
+        notes: yes
+        dest: "/tmp/r10_3_roundtrip.txt"
+
+    - name: "KSM-772.4 — Read file and verify"
+      slurp:
+        src: "/tmp/r10_3_roundtrip.txt"
+      register: roundtrip_content
+
+    - name: "KSM-772.4 — Assert set→copy round-trip content matches"
+      assert:
+        that:
+          - (roundtrip_content.content | b64decode) == "value for copy verification"
+        success_msg: "PASS [R7.3d]: Set→Copy round-trip verified"
+        fail_msg: "FAIL [R7.3d]: Round-trip file has '{{ roundtrip_content.content | b64decode }}'"
+
+    # Cleanup
+    - name: Remove round-trip file
+      file:
+        path: "/tmp/r10_3_roundtrip.txt"
+        state: absent
+
+    - name: Cleanup records
+      keeper_remove:
+        uid: "{{ item }}"
+      loop:
+        - "{{ has_notes_record.record_uid }}"
+        - "{{ no_notes_record.record_uid }}"
+      ignore_errors: yes

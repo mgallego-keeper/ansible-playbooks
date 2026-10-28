@@ -1,0 +1,50 @@
+---
+# R41.1 (KSM-1651): the Ansible CI workflow must constrain ansible-core independently of requirements.txt.
+#
+# KSM-1649 removed ansible-core from the Python package, so a bare "pip install ansible-core" in
+# .github/workflows/test.ansible.yml resolved Python 3.10 to the excluded 2.17 series and no job covered 2.16.
+# The workflow must (a) install with the global supported range AND the matrix spec in one pip command,
+# (b) never install an unqualified ansible-core, and (c) keep all eight explicit Python/engine pairs.
+# File-only check; no vault access. Needs variables: repo_path (checkout of keeper_secrets_manager_ansible).
+- name: "R41.1: CI workflow constrains ansible-core independently of the package"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    workflow: "{{ lookup('file', repo_path ~ '/../../.github/workflows/test.ansible.yml') }}"
+    pairs:
+      - ['"3.9"', '"ansible-core==2.15.13"']
+      - ['"3.10"', '"ansible-core>=2.16.19,<2.17"']
+      - ['"3.11"', '"ansible-core==2.15.13"']
+      - ['"3.11"', '"ansible-core~=2.18.0"']
+      - ['"3.11"', '"ansible-core~=2.19.0"']
+      - ['"3.12"', '"ansible-core~=2.20.0"']
+      - ['"3.12"', '"ansible-core~=2.21.0"']
+      - ['"3.13"', '"ansible-core~=2.21.0"']
+  tasks:
+    - name: The dependency step applies the global range and the matrix spec in one pip command
+      assert:
+        that:
+          - >-
+            'python3 -m pip install -r requirements.txt "ansible-core>=2.15.13,!=2.17.*" "$ANSIBLE_CORE_SPEC"' in workflow
+        success_msg: "PASS [R41.1]: global supported range and matrix spec share one pip command"
+        fail_msg: "FAIL [R41.1]: dependency step does not constrain ansible-core independently"
+
+    - name: No unqualified ansible-core install remains
+      assert:
+        that:
+          - "'ansible-core: [\"ansible-core\"]' not in workflow"
+          - "'pip install ansible-core\n' not in workflow"
+          - "'pip install -r requirements.txt \"$ANSIBLE_CORE_SPEC\"' not in workflow"
+        success_msg: "PASS [R41.1]: no bare ansible-core install"
+        fail_msg: "FAIL [R41.1]: workflow can still install an unconstrained ansible-core"
+
+    - name: Each supported Python/engine pair is an explicit matrix entry
+      assert:
+        that:
+          - "('python-version: ' ~ item[0] ~ '\n            ansible-core: ' ~ item[1]) in workflow"
+        success_msg: "PASS [R41.1]: pair {{ item[0] }} / {{ item[1] }} present"
+        fail_msg: "FAIL [R41.1]: pair {{ item[0] }} / {{ item[1] }} missing from the CI matrix"
+      loop: "{{ pairs }}"
+      loop_control:
+        label: "{{ item[0] }} / {{ item[1] }}"

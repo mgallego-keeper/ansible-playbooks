@@ -1,0 +1,55 @@
+---
+# R40.1 (KSM-1653): the Galaxy collection README must not promise that pip upgrades ansible-core.
+#
+# The Python package no longer depends on ansible-core (KSM-1649), so the collection README's
+# "Upgrading to 1.5.0" Requirements item and its 1.5.0 changelog must tell the user to install or
+# upgrade a supported ansible-core explicitly, in the same Python environment. File-only check; no
+# vault access. Needs variables: repo_path (checkout of keeper_secrets_manager_ansible).
+- name: "R40.1: Galaxy README engine instructions are explicit"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    readme: "{{ lookup('file', repo_path ~ '/ansible_galaxy/keepersecurity/keeper_secrets_manager/README.md') }}"
+    upgrade_section: "{{ readme.split('# Upgrading to 1.5.0\n')[1].split('# Changes\n')[0] }}"
+    changelog_section: "{{ readme.split('## 1.5.0\n')[1].split('## 1.4.0\n')[0] }}"
+    sections: ["{{ upgrade_section }}", "{{ changelog_section }}"]
+  tasks:
+    - name: Neither section promises an automatic pip upgrade of ansible-core
+      assert:
+        that:
+          - "'upgrades an unsupported ansible-core' not in item"
+          - "'When pip installs the Python package' not in item"
+        success_msg: "PASS [R40.1]: no automatic-upgrade promise"
+        fail_msg: "FAIL [R40.1]: README still promises that pip upgrades ansible-core"
+      loop: "{{ sections }}"
+      loop_control:
+        label: "section {{ ansible_loop.index }}"
+        extended: true
+
+    - name: Both sections require an explicit install in the same Python environment
+      assert:
+        that:
+          - "'does not install ansible-core' in item"
+          - "'does not install or upgrade it' in item"
+          - "'explicitly install or upgrade' in (item | lower)"
+          - "'same Python environment' in item"
+          - "'ansible-core>=2.15.13,!=2.17.*' in item"
+        success_msg: "PASS [R40.1]: explicit install instruction and supported range present"
+        fail_msg: "FAIL [R40.1]: README lacks the explicit engine install instruction"
+      loop: "{{ sections }}"
+      loop_control:
+        label: "section {{ ansible_loop.index }}"
+        extended: true
+
+    - name: Galaxy warning-versus-error behavior is still described
+      assert:
+        that:
+          - "'still runs' in item"
+          - "'`collections_on_ansible_version_mismatch = error`' in item"
+        success_msg: "PASS [R40.1]: warning/error behavior preserved"
+        fail_msg: "FAIL [R40.1]: README dropped the warning/error behavior"
+      loop: "{{ sections }}"
+      loop_control:
+        label: "section {{ ansible_loop.index }}"
+        extended: true

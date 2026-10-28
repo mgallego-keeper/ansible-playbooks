@@ -1,0 +1,42 @@
+---
+# Inner playbook for R20.1 and R20.4. Not a test by itself (the runner skips it: the name
+# does not start with A or R). The outer playbook runs it with the keeper_redact callback
+# and inspects what it printed.
+# Expects -e: keeper_config_file, kr_pw_uids (list), kr_num_uid.
+- name: "KSM-1592 inner: keeper_get / keeper_get_record results printed to the console"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
+
+  tasks:
+    - name: keeper_get of each password, as a loop (result is a results list)
+      keeper_get:
+        uid: "{{ item }}"
+        field: password
+      loop: "{{ kr_pw_uids }}"
+      register: kr_got
+
+    - name: keeper_get of the special-character password, no loop
+      keeper_get:
+        uid: "{{ kr_pw_uids[1] }}"
+        field: password
+      register: kr_single
+
+    - name: keeper_get of the numeric field
+      keeper_get:
+        uid: "{{ kr_num_uid }}"
+        field: birthDate
+      register: kr_num
+
+    - name: keeper_get_record of each record, as a loop
+      keeper_get_record:
+        uid: "{{ item }}"
+      loop: "{{ kr_pw_uids + [kr_num_uid] }}"
+      register: kr_recs
+
+    - name: keeper_get_record of the PEM record, no loop
+      keeper_get_record:
+        uid: "{{ kr_pw_uids[2] }}"
+      register: kr_single_rec

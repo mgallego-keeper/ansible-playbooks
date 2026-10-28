@@ -1,0 +1,24 @@
+---
+# R1.2: Invalid base64 config
+- name: "R1.2: Invalid base64 config"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    keeper_config: "not-valid-base64!!!"
+
+  tasks:
+    - name: Run keeper_get with invalid config
+      keeper_get:
+        uid: "XXXXXXXXXXXXXXXXXXXX"
+        field: login
+      register: result
+      ignore_errors: yes
+
+    - name: Verify error returned
+      assert:
+        that:
+          - result.failed
+        success_msg: "PASS [R1.2]: Invalid config handled — {{ result.msg | default('') | truncate(80) }}"
+        fail_msg: "FAIL [R1.2]: Should have failed with invalid config"

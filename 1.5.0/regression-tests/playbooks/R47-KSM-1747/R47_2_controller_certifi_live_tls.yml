@@ -1,0 +1,32 @@
+---
+# R47.2 (KSM-1747): the controller's certifi is at or above the floor, and a live Keeper request still succeeds with
+# TLS verification on (the SDK default). Read-only: one keeper_get.
+- name: "R47.2: controller certifi >= floor and live TLS read works"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    keeper_use_cache: false
+
+  tasks:
+    - name: Read certifi version from the controller's Python
+      command: "{{ ansible_playbook_python }} -c 'import certifi; print(certifi.__version__)'"
+      register: cv
+      changed_when: false
+
+    - name: Live read over TLS
+      keeper_get:
+        uid: "{{ record_uid }}"
+        field: login
+      register: got
+      no_log: true
+
+    - name: Verify
+      assert:
+        that:
+          - cv.stdout | trim is version('2026.10.19', '>=')
+          - got.value | length > 0
+        success_msg: "PASS [R47.2]: certifi {{ cv.stdout | trim }} >= 2026.10.19 and live TLS read succeeded"
+        fail_msg: "FAIL [R47.2]: certifi {{ cv.stdout | trim }} or live read failed"

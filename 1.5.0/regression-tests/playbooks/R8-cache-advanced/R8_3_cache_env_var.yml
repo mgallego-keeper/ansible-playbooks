@@ -1,0 +1,93 @@
+---
+# R8.3: KSM_CACHE_DIR environment variable
+#
+# Verifies that the KSM_CACHE_DIR environment variable controls cache location
+# when keeper_cache_dir is not set as an Ansible variable.
+#
+# KSM_CACHE_DIR is read at the OS process level, so it must be exported before
+# ansible-playbook starts. This test uses a shell subprocess to set the var
+# and run a nested playbook, then verifies the cache appeared at the expected path.
+#
+# Source: 1.2.6/KSM-672/test_global_env_var.yml
+
+- name: "R8.3: KSM_CACHE_DIR environment variable"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    env_cache_dir: "/tmp/r11_3_env_cache"
+    inner_playbook: "/tmp/R8_3_inner_cache.yml"
+
+  tasks:
+    - name: Ensure clean state
+      file:
+        path: "{{ env_cache_dir }}"
+        state: "{{ item }}"
+        mode: '0700'
+      loop: [absent, directory]
+
+    - name: Write inner playbook that caches via KSM_CACHE_DIR env var only (no keeper_cache_dir)
+      copy:
+        dest: "{{ inner_playbook }}"
+        content: |
+          ---
+          {% raw %}- name: Inner cache test
+            hosts: localhost
+            connection: local
+            gather_facts: false
+            vars:
+              keeper_config_file: "{{ config_file }}"
+              keeper_use_cache: "True"
+            tasks:
+              - name: Generate cache secret
+                keeper_password:
+                  length: 64
+                register: s
+                no_log: true
+              - name: Store secret
+                set_fact:
+                  keeper_record_cache_secret: "{{ s.password }}"
+                no_log: true
+              - name: Cache record
+                keeper_cache_records:
+                  uids:
+                    - "{{ record_uid }}"
+                no_log: true{% endraw %}
+        mode: '0644'
+
+    - name: Run inner playbook with KSM_CACHE_DIR set in environment
+      shell: |
+        ansible-playbook "{{ inner_playbook }}" \
+          -e config_file="{{ config_file }}" \
+          -e shared_folder_uid="{{ shared_folder_uid }}" \
+          -e record_uid="{{ record_uid }}"
+      environment:
+        ANSIBLE_CONFIG: "{{ playbook_dir }}/../../ansible.cfg"
+        OBJC_DISABLE_INITIALIZE_FORK_SAFETY: "YES"
+        KSM_CONFIG_SKIP_MODE_WARNING: "TRUE"
+        KSM_CACHE_DIR: "{{ env_cache_dir }}"
+      register: inner_result
+
+    - name: Stat expected cache location
+      stat:
+        path: "{{ env_cache_dir }}/ksm_cache.bin"
+      register: env_cache_stat
+
+    - name: Assert cache created at configured cache directory
+      assert:
+        that:
+          - env_cache_stat.stat.exists
+          - env_cache_stat.stat.size > 0
+        success_msg: "PASS [R8.3]: Cache created at {{ env_cache_dir }} — KSM_CACHE_DIR env var confirmed working"
+        fail_msg: "FAIL [R8.3]: Cache not found at {{ env_cache_dir }}"
+
+    # Cleanup
+    - name: Remove env cache dir and inner playbook
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ env_cache_dir }}"
+        - "{{ inner_playbook }}"

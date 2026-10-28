@@ -1,0 +1,18 @@
+---
+# R41.2 (KSM-1651): the ansible-core running this suite must be inside the supported range.
+#
+# Supported range: >=2.15.13 and not the 2.17 series (meta/runtime.yml requires_ansible). Without the
+# package pinning ansible-core, an unconstrained install can land on 2.17; this guard fails the suite
+# run instead of letting it pass on an unsupported engine. No vault access, no variables needed.
+- name: "R41.2: running ansible-core is supported"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Engine is at least 2.15.13 and not in the 2.17 series
+      assert:
+        that:
+          - ansible_version.full is version('2.15.13', '>=')
+          - ansible_version.full is not version('2.17.0', '>=') or ansible_version.full is version('2.18.0', '>=')
+        success_msg: "PASS [R41.2]: ansible-core {{ ansible_version.full }} is supported"
+        fail_msg: "FAIL [R41.2]: ansible-core {{ ansible_version.full }} is outside >=2.15.13,!=2.17.*"

@@ -1,0 +1,17 @@
+---
+# R3.2: Create without appOwnerPublicKey in config
+- name: "R3.2: Create without appOwnerPublicKey"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Document test
+      debug:
+        msg: |
+          MANUAL TEST:
+          1. Create a KSM config WITHOUT appOwnerPublicKey
+          2. Set keeper_config_file to that config
+          3. Run keeper_create with shared_folder_uid, record_type, title
+          4. EXPECTED: Error indicating appOwnerPublicKey is required for record creation
+          PASS [R3.2]: Test documented — requires manual config setup

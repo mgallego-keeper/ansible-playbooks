@@ -1,0 +1,35 @@
+---
+# Run this as a Controller Job Template using the Keeper QA EE and a Machine
+# credential containing an SSH private key. No Keeper vault credential is needed.
+# The companion Python file must be available in the same project directory.
+- name: Verify the Keeper EE runtime and Controller SSH credential injection
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    ee_expected_collection_version: "1.5.0"
+
+  tasks:
+    - name: Run runtime checks without modifying the EE
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - "{{ playbook_dir }}/ee_runtime_smoke.py"
+          - --expected-collection-version
+          - "{{ ee_expected_collection_version }}"
+          - --require-controller-ssh-agent
+      register: ee_smoke
+      changed_when: false
+      failed_when: false
+
+    - name: Require every runtime check to pass
+      ansible.builtin.assert:
+        that:
+          - ee_smoke.rc == 0
+        fail_msg: "EE runtime smoke failed. stdout: {{ ee_smoke.stdout | default('') }} stderr: {{ ee_smoke.stderr | default('') }}"
+        success_msg: EE runtime checks and SSH credential injection passed
+
+    - name: Show the runtime checks
+      ansible.builtin.debug:
+        msg: "{{ (ee_smoke.stdout | from_json).checks | map(attribute='name') | list }}"

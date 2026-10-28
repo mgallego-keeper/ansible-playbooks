@@ -1,0 +1,40 @@
+---
+# R46.2 (KSM-1692): after the package import, pickle and deepcopy of AnsibleUnsafeBytes must round-trip
+# on every supported runtime (the legacy reducer is repaired on Python 3.9/3.10 + ansible-core 2.15/2.16;
+# a no-op elsewhere), and, on the legacy unsafe-class engines (< 2.19), the value must stay an AnsibleUnsafeBytes (unsafe marker
+# preserved). Newer engines use native tagged values, so only the bytes are compared there.
+# No vault access. Cleans up nothing (read-only probe).
+- name: "R46.2: AnsibleUnsafeBytes pickle/deepcopy round trip after Keeper import"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Round-trip probe in the controller interpreter
+      command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - -c
+          - |
+            import copy, pickle
+            import keeper_secrets_manager_ansible
+            from ansible.utils.unsafe_proxy import AnsibleUnsafeBytes
+            v = AnsibleUnsafeBytes(bytes(range(256)))
+            p = pickle.loads(pickle.dumps(v))
+            d = copy.deepcopy(v)
+            from ansible.release import __version__ as av
+            if tuple(int(x) for x in av.split(".")[:2]) < (2, 19):
+                assert type(p) is AnsibleUnsafeBytes and type(d) is AnsibleUnsafeBytes
+            assert bytes(memoryview(p)) == bytes(range(256)) == bytes(memoryview(d))
+            print("ROUNDTRIP_OK")
+      environment:
+        PYTHONPATH: "{{ repo_path }}"
+      register: probe
+      changed_when: false
+
+    - name: Verify round trip
+      assert:
+        that:
+          - "'ROUNDTRIP_OK' in probe.stdout"
+        success_msg: "PASS [R46.2]: pickle/deepcopy round trip preserved bytes and unsafe class"
+        fail_msg: "FAIL [R46.2]: {{ probe.stdout }} {{ probe.stderr }}"

@@ -1,0 +1,51 @@
+---
+# R35.2: the folder diagnostics unit tests pass (KSM-1664).
+#
+# Before the fix, the folder actions put decrypted folder names, new names, sibling hints and private paths into
+# errors, display.warning text, -vvv text and SDK logger output, also for a no_log task. After the fix the
+# helpers _folder_no_log, _folder_sdk_logging, _private_folder_diagnostics and _raise_private_folder_error resolve
+# privacy from the action's own task, scope the SDK warning capture to the calling thread, and replace a private
+# failure with a fixed error that has no cause and no context link. Public diagnostics (no_log false) keep their
+# detail. A completeness-dependent read is refused when logging is globally disabled at WARNING or above.
+#
+# Run it with: -e repo_path=<integration/keeper_secrets_manager_ansible directory of the code under test>
+# The Python that runs ansible-playbook needs pytest and the keeper-secrets-manager-core package, and the code
+# under test installed (pip install of repo_path).
+#
+# Raw pip / local surface note: set ANSIBLE_COLLECTIONS_PATH to an EMPTY directory so that a stale collection
+# under ~/.ansible/collections cannot shadow the code under test.
+#
+# What this does: runs tests/keeper_folder_vault_test.py, tests/keeper_folder_unreadable_test.py,
+# tests/unit/plugins/action/test_keeper_update_folder.py and tests/integration/test_keeper_update_folder_target.py
+# from repo_path. Nothing touches the vault. Against the code before the fix, 62 of these tests fail.
+- name: "R35.2: unit tests for folder diagnostics pass"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Run the folder diagnostics tests
+      command: >-
+        env -u ANSIBLE_CONFIG {{ ansible_playbook_python }} -m pytest
+        tests/keeper_folder_vault_test.py tests/keeper_folder_unreadable_test.py
+        tests/unit/plugins/action/test_keeper_update_folder.py tests/integration/test_keeper_update_folder_target.py
+        -q -p no:cacheprovider
+      args:
+        chdir: "{{ repo_path }}"
+      environment:
+        PYTHONDONTWRITEBYTECODE: "1"
+        KSM_CONFIG_SKIP_MODE_WARNING: "TRUE"
+        OBJC_DISABLE_INITIALIZE_FORK_SAFETY: "YES"
+        no_proxy: "*"
+      register: r35_unit
+      changed_when: false
+      failed_when: false
+
+    - name: Assert the tests ran and all passed
+      assert:
+        that:
+          - r35_unit.rc == 0
+          - "' passed' in r35_unit.stdout"
+          - "' failed' not in r35_unit.stdout"
+        success_msg: "PASS [R35.2]: {{ (r35_unit.stdout_lines | default([]) | last | default('')) }}"
+        fail_msg: "FAIL [R35.2]: rc={{ r35_unit.rc }} {{ (r35_unit.stdout_lines | default([]) | last | default('')) }} {{ (r35_unit.stderr_lines | default([]) | last | default('')) }} (the Python that runs ansible-playbook needs pytest and the packages in repo_path/requirements.txt: pip install pytest)"

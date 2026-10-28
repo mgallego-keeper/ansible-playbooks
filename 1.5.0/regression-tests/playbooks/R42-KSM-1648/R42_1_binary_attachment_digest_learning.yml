@@ -1,0 +1,42 @@
+---
+# R42.1 (KSM-1648): keeper_redact must keep dispatching events after learning a non-UTF-8 attachment
+#
+# Inner playbook, run by R42_2 with ANSIBLE_STDOUT_CALLBACK=keeper_redact. Fetches a binary attachment
+# (a JPEG, so the bytes start with 0xFF and cannot be UTF-8), prints it, then fetches an ordinary
+# secret and prints that. Before the fix, learning the digests of the binary value raised UnicodeEncodeError
+# ("surrogates not allowed") on ansible-core 2.15, and the callback dropped the originating task's output.
+# Needs variables: attachment_record_uid, attachment_file_name, password_record_uid (record with a password field of 4+ characters).
+- name: "R42.1: binary attachment, then ordinary secret, under keeper_redact"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    keeper_config_file: "{{ config_file }}"
+  tasks:
+    - name: R42 binary fetch
+      keeper_get:
+        uid: "{{ attachment_record_uid }}"
+        file: "{{ attachment_file_name }}"
+      register: r42_bin
+
+    - name: R42 binary display
+      debug:
+        var: r42_bin.value
+
+    - name: R42 ordinary secret fetch
+      keeper_get:
+        uid: "{{ password_record_uid }}"
+        field: password
+      register: r42_pw
+
+    - name: R42 ordinary secret display
+      debug:
+        msg: "{{ {'secret': r42_pw.value, 'public': 'R42_PUBLIC_CONTROL'} }}"
+
+    - name: Registered binary value is the original bytes, not a marker
+      assert:
+        that:
+          - r42_bin.value | length > 1000
+          - r42_bin.value != '****'
+        success_msg: "PASS [R42.1]: registered binary value intact ({{ r42_bin.value | length }})"
+        fail_msg: "FAIL [R42.1]: registered binary value was altered"

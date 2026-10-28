@@ -1,0 +1,104 @@
+---
+# R6.3: Jinja2 variable indirection in keeper_config_file
+# Regression for KSM-781: composed variable paths must resolve
+# Source: 1.3.0/KSM-781/playbooks/02_ksm781_jinja2_variations.yml (Tests 5, 6)
+# QA setup: none beyond the variables. The playbook copies `config_file` to a temporary file named with the
+# templated path under test (so the path expansion is what is exercised) and removes it afterward.
+
+- name: "R6.3: Jinja2 variable indirection in keeper_config_file"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    config_dir: "{{ playbook_dir }}/../../../acceptance-tests"
+    config_filename: ".r6_3a_config.json"
+    keeper_config_file: "{{ config_dir }}/{{ config_filename }}"
+
+  tasks:
+    - name: Make sure the directory in the templated path exists
+      file:
+        path: "{{ keeper_config_file | dirname }}"
+        state: directory
+
+    - name: Write a temporary config at the templated path under test
+      copy:
+        src: "{{ config_file }}"
+        dest: "{{ keeper_config_file }}"
+        remote_src: yes
+        mode: "0600"
+      no_log: true
+
+    - block:
+      - name: Assert composed path resolved
+        assert:
+          that:
+            - keeper_config_file is not search('\{\{')
+          success_msg: "PASS [R6.3a]: Resolved to {{ keeper_config_file }}"
+          fail_msg: "FAIL [R6.3a]: Raw Jinja2 still in path"
+
+      - name: Connect via keeper_info (variable-composed path)
+        keeper_info:
+        register: info_result
+
+      - name: Assert plugin connected with variable-composed path
+        assert:
+          that:
+            - info_result.record_type_list is defined
+            - info_result.record_type_list | length > 0
+          success_msg: "PASS [R6.3b]: keeper_info succeeded with variable-composed config path"
+          fail_msg: "FAIL [R6.3b]: keeper_info failed — variable-composed path not resolved"
+
+      always:
+        - name: Remove the temporary config
+          file:
+            path: "{{ keeper_config_file }}"
+            state: absent
+
+- name: "R6.3: Jinja2 tilde concatenation in keeper_config_file"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    keeper_config_file: "{{ playbook_dir ~ '/../../../acceptance-tests/.r6_3b_config.json' }}"
+
+  tasks:
+    - name: Make sure the directory in the templated path exists
+      file:
+        path: "{{ keeper_config_file | dirname }}"
+        state: directory
+
+    - name: Write a temporary config at the templated path under test
+      copy:
+        src: "{{ config_file }}"
+        dest: "{{ keeper_config_file }}"
+        remote_src: yes
+        mode: "0600"
+      no_log: true
+
+    - block:
+      - name: Assert tilde-concatenated path resolved
+        assert:
+          that:
+            - keeper_config_file is not search('\{\{')
+          success_msg: "PASS [R6.3c]: Tilde path resolved to {{ keeper_config_file }}"
+          fail_msg: "FAIL [R6.3c]: Raw Jinja2 still in tilde-concatenated path"
+
+      - name: Connect via keeper_info (tilde concatenation)
+        keeper_info:
+        register: info_result
+
+      - name: Assert plugin connected with tilde-concatenated path
+        assert:
+          that:
+            - info_result.record_type_list is defined
+            - info_result.record_type_list | length > 0
+          success_msg: "PASS [R6.3d]: keeper_info succeeded with tilde-concatenated path"
+          fail_msg: "FAIL [R6.3d]: keeper_info failed — tilde-concatenated path not resolved"
+
+      always:
+        - name: Remove the temporary config
+          file:
+            path: "{{ keeper_config_file }}"
+            state: absent

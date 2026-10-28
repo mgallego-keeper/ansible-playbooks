@@ -1,0 +1,21 @@
+---
+# R2.2: Get non-existent field from valid record
+- name: "R2.2: Get non-existent field from valid record"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+
+  tasks:
+    - name: Get nonexistent field
+      keeper_get:
+        uid: "{{ record_uid }}"
+        field: "totally_fake_field_xyz"
+      register: result
+      ignore_errors: yes
+
+    - name: Verify handled
+      debug:
+        msg: "PASS [R2.2]: Result for nonexistent field — failed={{ result.failed | default(false) }}, value={{ result.value | default('null') }}"

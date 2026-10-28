@@ -1,0 +1,26 @@
+# R18.2: the keeper_redact callback still loads and runs correctly at runtime — the
+# documentation-quoting fix only touched the DOCUMENTATION string, not the redaction logic
+# (KSM-1614).
+- name: "R18.2: keeper_redact callback stays functional live"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+
+  tasks:
+    - name: Get login field by UID with keeper_redact as the active stdout callback
+      keeper_get:
+        uid: "{{ record_uid }}"
+        field: login
+      register: result
+      no_log: true
+
+    - name: Assert the live call succeeded
+      assert:
+        that:
+          - result.value is defined
+          - result.value | length > 0
+        success_msg: "PASS [R18.2]: keeper_get succeeded live with keeper_redact active"
+        fail_msg: "FAIL [R18.2]: keeper_get failed live"

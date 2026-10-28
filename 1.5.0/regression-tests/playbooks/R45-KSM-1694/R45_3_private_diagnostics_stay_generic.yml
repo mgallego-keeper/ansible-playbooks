@@ -1,0 +1,59 @@
+---
+# R45.3 (KSM-1694): the fix must not widen what is exposed. A value-bearing diagnostic (a padded folder UID,
+# which the plain message would echo) must still collapse to the generic private message under no_log: true,
+# and the UID must not appear. A normal create/lookup/delete under no_log: true must still succeed.
+- name: "R45.3: private diagnostics stay generic; successful no_log operations unchanged"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    generic_msg: "The folder operation failed. Diagnostic details are hidden because no_log is enabled."
+
+  tasks:
+    - name: Padded folder_uid (value-bearing diagnostic), no_log true
+      keeper_delete_folder:
+        folder_uid: " {{ shared_folder_uid }} "
+      register: padded
+      ignore_errors: true
+      no_log: true
+
+    - name: Verify generic fallback and no UID leak
+      assert:
+        that:
+          - padded is failed
+          - generic_msg in padded.msg
+          - shared_folder_uid not in padded.msg
+        success_msg: "PASS [R45.3]: padded UID diagnostic stays generic"
+        fail_msg: "FAIL [R45.3]: {{ padded.msg | default('') }}"
+
+    - block:
+        - name: Create a folder under no_log true
+          keeper_create_folder:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            folder_name: "R45.3 {{ ansible_date_time.epoch | default('control') }}"
+          register: made
+          no_log: true
+
+        - name: Look it up by UID under no_log true
+          keeper_get_folder:
+            subfolder_uid: "{{ made.folder_uid }}"
+          register: found
+          no_log: true
+
+        - name: Verify the successful path is unchanged
+          assert:
+            that:
+              - made.changed
+              - found.folder_uid == made.folder_uid
+            success_msg: "PASS [R45.3]: create + lookup succeed under no_log: true"
+            fail_msg: "FAIL [R45.3]: successful no_log operation changed"
+      always:
+        - name: Delete the control folder
+          keeper_delete_folder:
+            folder_uid: "{{ made.folder_uid }}"
+            force_deletion: true
+          when: made is defined and made.folder_uid is defined
+          ignore_errors: true
+          no_log: true

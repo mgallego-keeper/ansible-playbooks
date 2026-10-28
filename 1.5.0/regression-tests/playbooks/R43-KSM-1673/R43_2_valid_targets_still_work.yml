@@ -1,0 +1,76 @@
+---
+# R43.2 (KSM-1673): valid record targets keep working after the hierarchy check.
+#
+# Omitted, null, and empty subfolder_uid mean the shared-folder root; a direct child and a deeper descendant must
+# create the record in that exact subfolder. Check mode must predict success with a null record_uid and create nothing.
+# Needs variables: config_file, shared_folder_uid (shared root A), ksm1673_subfolder (direct child of A),
+# ksm1673_deep_subfolder (descendant of A, two levels down).
+- name: "R43.2: Valid record targets create in the right folder"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+
+  tasks:
+    - name: Freeze the run tag
+      set_fact:
+        tag: "R43.2-KSM1673-{{ now(fmt='%Y%m%d_%H%M%S') }}"
+
+    - name: Create at each valid target
+      keeper_create:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        subfolder_uid: "{{ item.sub | default(omit) }}"
+        record_type: login
+        title: "{{ tag }} {{ item.id }}"
+        login: "r43_user"
+      loop:
+        - {id: omitted_subfolder, inner: ""}
+        - {id: null_subfolder, sub: null, inner: ""}
+        - {id: empty_subfolder, sub: "", inner: ""}
+        - {id: direct_child, sub: "{{ ksm1673_subfolder }}", inner: "{{ ksm1673_subfolder }}"}
+        - {id: deep_descendant, sub: "{{ ksm1673_deep_subfolder }}", inner: "{{ ksm1673_deep_subfolder }}"}
+      register: created
+
+    - name: Preview the subfolder targets in check mode
+      keeper_create:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        subfolder_uid: "{{ item }}"
+        record_type: login
+        title: "{{ tag }} check-{{ item }}"
+        login: "r43_user"
+      check_mode: true
+      loop: ["{{ ksm1673_subfolder }}", "{{ ksm1673_deep_subfolder }}"]
+      register: preview
+
+    - name: Probe and remove everything this run created
+      command:
+        argv: ["{{ ansible_playbook_python }}", "{{ playbook_dir }}/R43_probe.py", "{{ keeper_config_file }}", "{{ tag }}", "--delete"]
+      environment:
+        KSM_CONFIG_SKIP_MODE_WARNING: "TRUE"
+      register: probe
+      changed_when: false
+
+    - name: Each record landed in the requested folder
+      assert:
+        that:
+          - (probe.stdout_lines[-1] | from_json)[tag ~ ' ' ~ item.item.id].folder_uid == shared_folder_uid
+          - (probe.stdout_lines[-1] | from_json)[tag ~ ' ' ~ item.item.id].inner_folder_uid == item.item.inner
+        success_msg: "PASS [R43.2]: {{ item.item.id }} landed in the expected folder"
+        fail_msg: "FAIL [R43.2]: {{ item.item.id }} placed wrongly — {{ probe.stdout_lines[-1] }}"
+      loop: "{{ created.results }}"
+      loop_control: {label: "{{ item.item.id }}"}
+
+    - name: Check mode predicted success, returned a null UID, and created nothing
+      assert:
+        that:
+          - item is changed
+          - item.record_uid is none
+          - (tag ~ ' check-' ~ item.item) not in (probe.stdout_lines[-1] | from_json)
+        success_msg: "PASS [R43.2]: check mode previewed {{ item.item }} without creating a record"
+        fail_msg: "FAIL [R43.2]: check mode preview for {{ item.item }} was wrong"
+      loop: "{{ preview.results }}"
+      loop_control: {label: "{{ item.item }}"}

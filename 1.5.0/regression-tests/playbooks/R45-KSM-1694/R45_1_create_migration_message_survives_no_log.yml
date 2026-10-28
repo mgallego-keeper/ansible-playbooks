@@ -1,0 +1,55 @@
+---
+# R45.1 (KSM-1694): the keeper_create folder_uid -> subfolder_uid migration error must stay readable under
+# no_log: true (KSM-1664 replaced it with the generic privacy message). Populated and empty legacy key, no_log
+# true and false, must produce the same approved text, and no record may be created.
+- name: "R45.1: keeper_create legacy folder_uid migration message under no_log"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    migration_msg: "The folder_uid parameter for keeper_create has been renamed to subfolder_uid. Please update your playbook."
+
+  tasks:
+    - name: Populated legacy key, no_log true
+      keeper_create:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        folder_uid: "ANY_VALUE_NEVER_RESOLVED"
+        record_type: login
+        title: "R45.1 ShouldNotBeCreated"
+      register: priv_populated
+      ignore_errors: true
+      no_log: true
+
+    - name: Empty legacy key, no_log true
+      keeper_create:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        folder_uid: ""
+        record_type: login
+        title: "R45.1 ShouldNotBeCreated"
+      register: priv_empty
+      ignore_errors: true
+      no_log: true
+
+    - name: Populated legacy key, no_log false (reference)
+      keeper_create:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        folder_uid: "ANY_VALUE_NEVER_RESOLVED"
+        record_type: login
+        title: "R45.1 ShouldNotBeCreated"
+      register: pub_populated
+      ignore_errors: true
+
+    - name: Verify the approved message survives no_log and matches the no_log false result
+      assert:
+        that:
+          - priv_populated is failed
+          - priv_empty is failed
+          - priv_populated is not changed
+          - migration_msg in priv_populated.msg
+          - migration_msg in priv_empty.msg
+          - migration_msg in pub_populated.msg
+          - "'The folder operation failed' not in priv_populated.msg"
+        success_msg: "PASS [R45.1]: migration message preserved under no_log: true"
+        fail_msg: "FAIL [R45.1]: priv={{ priv_populated.msg | default('') }} | empty={{ priv_empty.msg | default('') }}"

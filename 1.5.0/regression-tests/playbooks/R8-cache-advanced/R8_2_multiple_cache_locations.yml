@@ -1,0 +1,136 @@
+---
+# R8.2: Multiple isolated cache locations (KSM-672 / Issue #675)
+#
+# Verifies that two integrations using different keeper_cache_dir values
+# maintain completely separate caches with no cross-contamination.
+#
+# This was the exact fix in KSM-672: cache files were being written to the
+# wrong directory (working dir) regardless of keeper_cache_dir setting.
+#
+# Source: 1.2.6/KSM-672/test_multiple_cache_locations.yml
+
+- name: "R8.2: Multiple cache locations — KSM-672 isolation regression"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    cache_dir_a: "/tmp/r11_2_cache_a"
+    cache_dir_b: "/tmp/r11_2_cache_b"
+
+  tasks:
+    # Clean up any leftovers
+    - name: Ensure clean state
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ cache_dir_a }}"
+        - "{{ cache_dir_b }}"
+        - "{{ playbook_dir }}/ksm_cache.bin"
+
+    # Create both cache directories
+    - name: Create cache directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0700'
+      loop:
+        - "{{ cache_dir_a }}"
+        - "{{ cache_dir_b }}"
+
+    # Generate a single shared cache secret (both caches use the same secret;
+    # isolation is about directory placement, not key separation)
+    - name: Generate shared cache secret
+      keeper_password:
+        length: 64
+      register: shared_secret
+      no_log: true
+
+    - name: Store cache secret at play level
+      set_fact:
+        keeper_record_cache_secret: "{{ shared_secret.password }}"
+      no_log: true
+
+    # === CACHE A ===
+    - name: Populate cache A
+      keeper_cache_records:
+        uids:
+          - "{{ record_uid }}"
+      vars:
+        keeper_use_cache: "True"
+        keeper_cache_dir: "{{ cache_dir_a }}"
+      register: cached_a
+      no_log: true
+
+    - name: Stat cache A file
+      stat:
+        path: "{{ cache_dir_a }}/ksm_cache.bin"
+      register: stat_a
+
+    # === CACHE B ===
+    - name: Populate cache B
+      keeper_cache_records:
+        uids:
+          - "{{ record_uid }}"
+      vars:
+        keeper_use_cache: "True"
+        keeper_cache_dir: "{{ cache_dir_b }}"
+      register: cached_b
+      no_log: true
+
+    - name: Stat cache B file
+      stat:
+        path: "{{ cache_dir_b }}/ksm_cache.bin"
+      register: stat_b
+
+    # Verify working directory is clean
+    - name: Stat working dir (should be empty)
+      stat:
+        path: "{{ playbook_dir }}/ksm_cache.bin"
+      register: stat_cwd
+
+    # === ASSERTIONS ===
+    - name: Assert both caches exist in their own dirs and no pollution
+      assert:
+        that:
+          - stat_a.stat.exists
+          - stat_b.stat.exists
+          - not stat_cwd.stat.exists
+        success_msg: "PASS [R8.2a]: Cache A at {{ cache_dir_a }}, Cache B at {{ cache_dir_b }}, no working-dir pollution — KSM-672 fix confirmed"
+        fail_msg: "FAIL [R8.2a]: Cache isolation broken — A={{ stat_a.stat.exists }}, B={{ stat_b.stat.exists }}, CWD={{ stat_cwd.stat.exists }}"
+
+    # Verify both caches are independently readable
+    - name: Read from cache A
+      keeper_get:
+        cache: "{{ cached_a.cache }}"
+        uid: "{{ record_uid }}"
+        field: login
+      register: read_a
+
+    - name: Read from cache B
+      keeper_get:
+        cache: "{{ cached_b.cache }}"
+        uid: "{{ record_uid }}"
+        field: login
+      register: read_b
+
+    - name: Assert both caches independently readable
+      assert:
+        that:
+          - read_a.value is defined
+          - read_a.value | length > 0
+          - read_b.value is defined
+          - read_b.value | length > 0
+        success_msg: "PASS [R8.2b]: Both caches independently readable — A='{{ read_a.value }}', B='{{ read_b.value }}'"
+        fail_msg: "FAIL [R8.2b]: Cache read failed — A={{ read_a.value | default('FAIL') }}, B={{ read_b.value | default('FAIL') }}"
+
+    # Cleanup
+    - name: Remove cache directories
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ cache_dir_a }}"
+        - "{{ cache_dir_b }}"

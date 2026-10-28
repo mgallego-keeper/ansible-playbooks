@@ -1,0 +1,88 @@
+# R15.1: keeper_delete_folder deletes an empty folder, re-deleting a gone folder is a
+# no-op (not a failure), and a non-empty folder requires force_deletion (KSM-1480).
+- name: "R15.1: keeper_delete_folder delete + idempotency + force_deletion"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    empty_name: "R15-KSM-1480 Regression Empty"
+    full_name: "R15-KSM-1480 Regression Full"
+
+  tasks:
+    - name: Create the empty-folder fixture
+      keeper_create_folder:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        folder_name: "{{ empty_name }}"
+      register: empty_folder
+
+    - name: Delete the empty folder
+      keeper_delete_folder:
+        folder_uid: "{{ empty_folder.folder_uid }}"
+      register: first_delete
+
+    - name: Assert the delete succeeded
+      assert:
+        that:
+          - first_delete.changed == true
+        success_msg: "PASS [R15.1]: Deleted {{ empty_folder.folder_uid }}"
+        fail_msg: "FAIL [R15.1]: {{ first_delete }}"
+
+    - name: Re-run the delete on the now-gone folder
+      keeper_delete_folder:
+        folder_uid: "{{ empty_folder.folder_uid }}"
+      register: second_delete
+
+    - name: Assert no failure and changed=false
+      assert:
+        that:
+          - second_delete is not failed
+          - second_delete.changed == false
+        success_msg: "PASS [R15.1]: Idempotent — {{ second_delete.msg }}"
+        fail_msg: "FAIL [R15.1]: {{ second_delete }}"
+
+    - name: Create the full-folder fixture with a record inside it
+      keeper_create_folder:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        folder_name: "{{ full_name }}"
+      register: full_folder
+
+    - name: Create a record inside the full-folder fixture
+      keeper_create:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        subfolder_uid: "{{ full_folder.folder_uid }}"
+        record_type: login
+        title: "R15.1 record in regression full folder"
+        generate_password: true
+        fields:
+          - type: login
+            value: "r15_1@example.com"
+      no_log: true
+
+    - name: Delete the non-empty folder without force_deletion
+      keeper_delete_folder:
+        folder_uid: "{{ full_folder.folder_uid }}"
+      register: refused_delete
+      ignore_errors: true
+
+    - name: Assert the delete was refused
+      assert:
+        that:
+          - refused_delete is failed
+          - "'is not empty' in refused_delete.msg"
+        success_msg: "PASS [R15.1]: Refused — {{ refused_delete.msg }}"
+        fail_msg: "FAIL [R15.1]: {{ refused_delete }}"
+
+    - name: Delete the non-empty folder with force_deletion
+      keeper_delete_folder:
+        folder_uid: "{{ full_folder.folder_uid }}"
+        force_deletion: true
+      register: forced_delete
+
+    - name: Assert the forced delete succeeded
+      assert:
+        that:
+          - forced_delete.changed == true
+        success_msg: "PASS [R15.1]: Force-deleted {{ full_folder.folder_uid }} and its record"
+        fail_msg: "FAIL [R15.1]: {{ forced_delete }}"

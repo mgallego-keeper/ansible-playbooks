@@ -1,0 +1,41 @@
+---
+# R38.1 (KSM-1642): keeper_get file= under keeper_redact must not print attachment bytes
+#
+# Inner playbook, run by R38_2 with ANSIBLE_STDOUT_CALLBACK=keeper_redact. Fetches a binary (non-UTF-8)
+# attachment by file= and by notation, then prints the registered results with no no_log.
+# Before the fix, ansible-core 2.19+ printed the decrypted bytes in plaintext in both places.
+# Needs variables: attachment_record_uid (record holding attachment_file_name, e.g. a JPEG).
+- name: "R38.1: keeper_get file attachment under keeper_redact"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    keeper_config_file: "{{ config_file }}"
+  tasks:
+    - name: Get attachment by file=
+      keeper_get:
+        uid: "{{ attachment_record_uid }}"
+        file: "{{ attachment_file_name }}"
+      register: fetched
+
+    - name: Print registered result (callback must mask the bytes)
+      debug:
+        var: fetched
+
+    - name: Get attachment by notation
+      keeper_get:
+        notation: "{{ attachment_record_uid }}/file/{{ attachment_file_name }}"
+      register: fetched_nt
+
+    - name: Print notation result (callback must mask the bytes)
+      debug:
+        var: fetched_nt
+
+    - name: Registered values are the original bytes, not a marker
+      assert:
+        that:
+          - fetched.value | length == fetched_nt.value | length
+          - fetched.value | length > 1000
+          - fetched.value != '****'
+        success_msg: "PASS [R38.1]: registered attachment value intact ({{ fetched.value | length }} bytes)"
+        fail_msg: "FAIL [R38.1]: registered attachment value was altered"

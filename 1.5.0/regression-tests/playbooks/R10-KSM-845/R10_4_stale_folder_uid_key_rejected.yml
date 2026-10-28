@@ -1,0 +1,29 @@
+---
+# R10.4: The old (renamed-away) folder_uid key must fail loudly, not silently drop to shared folder root (KSM-1454)
+- name: "R10.4: keeper_create with the stale folder_uid key"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+
+  tasks:
+    - name: Attempt create using the old folder_uid key
+      keeper_create:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        folder_uid: "ANY_VALUE_NEVER_RESOLVED"
+        record_type: login
+        title: "R10.4 ShouldNotBeCreated"
+        generate_password: True
+      register: result
+      ignore_errors: yes
+      no_log: true
+
+    - name: Verify the rename guard rejected the stale key
+      assert:
+        that:
+          - result is failed
+          - "'The folder_uid parameter for keeper_create has been renamed to subfolder_uid' in (result.msg | default(''))"
+        success_msg: "PASS [R10.4]: Stale folder_uid key rejected — {{ result.msg | default('') }}"
+        fail_msg: "FAIL [R10.4]: Stale folder_uid key was NOT rejected as expected — result: {{ result }}"

@@ -1,0 +1,24 @@
+---
+# R2.3: Get with neither field, custom_field, file, nor notes
+- name: "R2.3: Get with no field specified"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+
+  tasks:
+    - name: Run keeper_get with uid only (no field)
+      keeper_get:
+        uid: "{{ record_uid }}"
+      register: result
+      ignore_errors: yes
+
+    - name: Verify error
+      assert:
+        that:
+          - result.failed
+          - "'field' in result.msg | lower or 'custom_field' in result.msg | lower or 'notes' in result.msg | lower"
+        success_msg: "PASS [R2.3]: Missing field error — {{ result.msg | truncate(80) }}"
+        fail_msg: "FAIL [R2.3]: Should have failed"

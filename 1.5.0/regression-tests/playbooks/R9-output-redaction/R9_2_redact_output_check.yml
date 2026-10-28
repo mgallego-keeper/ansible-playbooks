@@ -1,0 +1,73 @@
+---
+# R9.2: keeper_redact callback — verify canary values masked in captured output
+#
+# Runs R9_1 as a subprocess and inspects the stdout to confirm:
+#   - keeper_client_id canary value does NOT appear raw
+#   - keeper_private_key canary value does NOT appear raw
+#   - Keeper_public_info value DOES appear (capital K not redacted)
+#   - "****" appears (redaction marker present)
+#
+# This is the only reliable way to test a callback plugin from Ansible itself.
+
+- name: "R9.2: Verify keeper_redact masks secrets in captured output"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    canary_client_id: "REDACT_CANARY_CLIENT_ID_12345"
+    canary_private_key: "REDACT_CANARY_PRIVATE_KEY_67890"
+    not_secret: "NOT_SECRET_SHOULD_APPEAR"
+    r9_1_playbook: "{{ playbook_dir }}/R9_1_redact_secrets.yml"
+
+  tasks:
+    - name: Run R9_1 playbook and capture output
+      shell: |
+        ansible-playbook "{{ r9_1_playbook }}" \
+          -e config_file="{{ config_file }}" \
+          -e shared_folder_uid="{{ shared_folder_uid }}"
+      environment:
+        ANSIBLE_CONFIG: "{{ playbook_dir }}/../../ansible.cfg"
+        ANSIBLE_ACTION_PLUGINS: "{{ repo_path }}/keeper_secrets_manager_ansible/plugins/action"
+        ANSIBLE_LOOKUP_PLUGINS: "{{ repo_path }}/keeper_secrets_manager_ansible/plugins/lookup"
+        ANSIBLE_CALLBACK_PLUGINS: "{{ repo_path }}/keeper_secrets_manager_ansible/plugins/callback"
+        ANSIBLE_MODULE_UTILS: "{{ repo_path }}/keeper_secrets_manager_ansible"
+        ANSIBLE_LIBRARY: "{{ repo_path }}/keeper_secrets_manager_ansible/plugins/modules"
+        ANSIBLE_STDOUT_CALLBACK: keeper_redact
+        OBJC_DISABLE_INITIALIZE_FORK_SAFETY: "YES"
+        KSM_CONFIG_SKIP_MODE_WARNING: "TRUE"
+      register: r9_output
+      ignore_errors: true
+
+    - name: Show captured output (for debugging)
+      debug:
+        msg: "{{ r9_output.stdout }}"
+
+    - name: Assert canary_client_id is NOT in raw output (was redacted)
+      assert:
+        that:
+          - canary_client_id not in r9_output.stdout
+        success_msg: "PASS [R9.2a]: keeper_client_id canary '{{ canary_client_id }}' was redacted from output"
+        fail_msg: "FAIL [R9.2a]: REDACTION BROKEN — keeper_client_id canary appeared raw in output"
+
+    - name: Assert canary_private_key is NOT in raw output (was redacted)
+      assert:
+        that:
+          - canary_private_key not in r9_output.stdout
+        success_msg: "PASS [R9.2b]: keeper_private_key canary '{{ canary_private_key }}' was redacted from output"
+        fail_msg: "FAIL [R9.2b]: REDACTION BROKEN — keeper_private_key canary appeared raw in output"
+
+    - name: Assert non-secret value IS visible in output (capital K not redacted)
+      assert:
+        that:
+          - not_secret in r9_output.stdout
+        success_msg: "PASS [R9.2c]: Keeper_public_info '{{ not_secret }}' visible — capital-K vars not over-redacted"
+        fail_msg: "FAIL [R9.2c]: Non-secret value was incorrectly redacted"
+
+    - name: Assert redaction marker present in output
+      assert:
+        that:
+          - "'****' in r9_output.stdout"
+        success_msg: "PASS [R9.2d]: Redaction marker '****' found in output"
+        fail_msg: "FAIL [R9.2d]: No redaction marker found — callback may not be active"

@@ -1,0 +1,99 @@
+---
+# R8.1: Cache fallback / disaster recovery
+#
+# Verifies the cache can serve data when the Keeper server is unreachable.
+# This is the core DR (disaster recovery) feature of keeper_cache_records.
+#
+# Approach:
+#   1. Populate cache from live server using a valid seed record
+#   2. Verify cache file exists on disk
+#   3. Read back using the cached object — confirms cache is usable offline
+#
+# Source: 1.2.6/KSM-672/test_cache_fallback.yml
+
+- name: "R8.1: Cache fallback / DR — cache serves data without server"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    cache_dir: "/tmp/r11_1_dr_cache"
+    keeper_use_cache: "True"
+    keeper_cache_dir: "{{ cache_dir }}"
+
+  tasks:
+    - name: Ensure clean cache dir
+      file:
+        path: "{{ cache_dir }}"
+        state: "{{ item }}"
+        mode: '0700'
+      loop: [absent, directory]
+
+    - name: Generate cache secret
+      keeper_password:
+        length: 64
+      register: cache_secret_gen
+      no_log: true
+
+    - name: Store cache secret
+      set_fact:
+        keeper_record_cache_secret: "{{ cache_secret_gen.password }}"
+      no_log: true
+
+    # Step 1: Populate cache from live server
+    - name: Cache seed record from live server
+      keeper_cache_records:
+        uids:
+          - "{{ record_uid }}"
+      register: cached
+      no_log: true
+
+    # Step 2: Verify cache file exists on disk at configured location
+    - name: Stat cache file
+      stat:
+        path: "{{ cache_dir }}/ksm_cache.bin"
+      register: cache_file
+
+    - name: Assert cache file created in configured directory
+      assert:
+        that:
+          - cache_file.stat.exists
+          - cache_file.stat.size > 0
+        success_msg: "PASS [R8.1a]: Cache file created at {{ cache_dir }}/ksm_cache.bin ({{ cache_file.stat.size }} bytes)"
+        fail_msg: "FAIL [R8.1a]: Cache file not found at {{ cache_dir }}"
+
+    # Step 3: Read from cache object — simulates offline / DR scenario
+    - name: Read from cache (no server needed)
+      keeper_get:
+        cache: "{{ cached.cache }}"
+        uid: "{{ record_uid }}"
+        field: login
+      register: dr_read
+
+    - name: Assert cache read succeeded
+      assert:
+        that:
+          - dr_read.value is defined
+          - dr_read.value | length > 0
+        success_msg: "PASS [R8.1b]: DR cache read succeeded — got '{{ dr_read.value }}' without server"
+        fail_msg: "FAIL [R8.1b]: Cache read failed — DR capability broken"
+
+    # Step 4: Verify cache isolation — no pollution in working directory
+    - name: Stat cache file in working dir (should NOT exist)
+      stat:
+        path: "{{ playbook_dir }}/ksm_cache.bin"
+      register: cwd_cache
+
+    - name: Assert no cache pollution in working directory
+      assert:
+        that:
+          - not cwd_cache.stat.exists
+        success_msg: "PASS [R8.1c]: No cache file pollution in working directory"
+        fail_msg: "FAIL [R8.1c]: Cache file leaked into working directory — KSM-672 regression"
+
+    # Cleanup
+    - name: Remove cache dir
+      file:
+        path: "{{ cache_dir }}"
+        state: absent

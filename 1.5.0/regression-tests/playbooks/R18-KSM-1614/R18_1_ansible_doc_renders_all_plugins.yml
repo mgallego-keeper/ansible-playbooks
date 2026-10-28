@@ -1,0 +1,45 @@
+# R18.1: ansible-doc renders the keeper_redact callback, the keeper lookup, and the modules
+# cleanly — none of their DOCUMENTATION blocks have an unquoted list item that YAML would read
+# as a mapping instead of a string (KSM-1614).
+- name: "R18.1: ansible-doc renders every plugin cleanly"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    doc_targets:
+      - { doc_type: callback, name: keeper_redact }
+      - { doc_type: lookup, name: keeper }
+      - { doc_type: module, name: keeper_get }
+      - { doc_type: module, name: keeper_create }
+      - { doc_type: module, name: keeper_set }
+
+  tasks:
+    - name: Run ansible-doc for each plugin
+      command:
+        cmd: "ansible-doc -t {{ item.doc_type }} {{ item.name }}"
+      environment:
+        ANSIBLE_CALLBACK_PLUGINS: "{{ repo_path }}/keeper_secrets_manager_ansible/plugins/callback"
+        ANSIBLE_LOOKUP_PLUGINS: "{{ repo_path }}/keeper_secrets_manager_ansible/plugins/lookup"
+        ANSIBLE_LIBRARY: "{{ repo_path }}/keeper_secrets_manager_ansible/plugins/modules"
+        ANSIBLE_NOCOLOR: "1"
+      loop: "{{ doc_targets }}"
+      loop_control:
+        label: "{{ item.doc_type }}/{{ item.name }}"
+      register: doc_results
+      changed_when: false
+      failed_when: false
+
+    - name: Assert every plugin's documentation rendered without error
+      assert:
+        that:
+          - item.rc == 0
+          - item.item.name in item.stdout
+          - "'AnsibleMapping' not in item.stdout"
+          - "'ERROR' not in item.stdout"
+        success_msg: "PASS [R18.1]: ansible-doc rendered {{ item.item.doc_type }}/{{ item.item.name }} cleanly"
+        fail_msg: "FAIL [R18.1]: ansible-doc failed on {{ item.item.doc_type }}/{{ item.item.name }} — {{ item.stdout }}{{ item.stderr }}"
+      loop: "{{ doc_results.results }}"
+      loop_control:
+        label: "{{ item.item.doc_type }}/{{ item.item.name }}"

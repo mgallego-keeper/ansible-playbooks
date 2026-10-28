@@ -1,0 +1,48 @@
+# R12.2: keeper_create_folder creates a folder nested inside an existing subfolder via
+# subfolder_uid, and re-running does not create a duplicate nested folder (KSM-1445).
+- name: "R12.2: keeper_create_folder idempotent creation nested in a subfolder"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    parent_folder_name: "R12-KSM-1445 Regression Root Folder"
+    nested_folder_name: "R12-KSM-1445 Regression Nested Folder"
+
+  tasks:
+    - name: Create or reuse the parent regression folder
+      keeper_create_folder:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        folder_name: "{{ parent_folder_name }}"
+      register: parent_folder
+
+    - name: Create the nested folder inside the parent folder
+      keeper_create_folder:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        subfolder_uid: "{{ parent_folder.folder_uid }}"
+        folder_name: "{{ nested_folder_name }}"
+      register: first_create
+
+    - name: Verify the nested folder_uid returned and differs from the parent
+      assert:
+        that:
+          - first_create.folder_uid is defined
+          - first_create.folder_uid != parent_folder.folder_uid
+        success_msg: "PASS [R12.2]: Nested folder created — UID {{ first_create.folder_uid }}"
+        fail_msg: "FAIL [R12.2]: No distinct folder_uid returned for the nested folder"
+
+    - name: Re-create the same nested folder (idempotency)
+      keeper_create_folder:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        subfolder_uid: "{{ parent_folder.folder_uid }}"
+        folder_name: "{{ nested_folder_name }}"
+      register: second_create
+
+    - name: Assert the second run did not create a duplicate nested folder
+      assert:
+        that:
+          - second_create.changed == false
+          - second_create.folder_uid == first_create.folder_uid
+        success_msg: "PASS [R12.2]: Idempotent — same nested UID {{ second_create.folder_uid }}, changed=false"
+        fail_msg: "FAIL [R12.2]: Expected changed=false and the same folder_uid as the first nested create"

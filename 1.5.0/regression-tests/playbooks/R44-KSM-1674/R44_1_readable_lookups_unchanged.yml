@@ -1,0 +1,65 @@
+---
+# R44.1 (KSM-1674): name and path lookups on a fully readable vault keep working after the completeness check.
+#
+# Unique names and paths at several depths, with include_subfolders false and true, resolve to the right UID. Readable
+# duplicate names keep the ambiguity error. A missing name keeps the plain not-found error (not the new uncertainty
+# error, which only applies when the SDK skipped a folder). Read-only; nothing is created or changed.
+# Needs variables: config_file, shared_folder_uid, shared_folder_name, ksm1673_subfolder, ksm1673_deep_subfolder,
+# ksm1674_databases_uid, ksm1674_production_uid, ksm1674_hidden_uid. create_seed_records.yml creates the folder tree
+# (and the pair of folders that share one name) and prints these values.
+- name: "R44.1: Readable name and path lookups are unchanged"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    res: "{{ shared_folder_uid }}"
+    root_name: "KSM-1445 Root Folder Test"
+    nested_name: "KSM-1445 Nested Folder Test"
+    databases_name: "KSM-1478 Databases"
+    production_name: "KSM-1478 Production"
+    hidden_name: "KSM-1674 Hidden Folder"
+    duplicate_name: "KSM-1479 Rename Target (Renamed)"
+    r44_names:
+      ksm1673_subfolder: "{{ root_name }}"
+      ksm1673_deep_subfolder: "{{ nested_name }}"
+      ksm1674_databases_uid: "{{ databases_name }}"
+      ksm1674_production_uid: "{{ production_name }}"
+      ksm1674_hidden_uid: "{{ hidden_name }}"
+    cases:
+      - {id: 1, opts: {shared_folder_uid: "{{ res }}", folder_name: "{{ root_name }}"}, want_uid: "{{ ksm1673_subfolder }}"}
+      - {id: 2, opts: {folder_path: "{{ shared_folder_name }}/{{ databases_name }}/{{ production_name }}"}, want_uid: "{{ ksm1674_production_uid }}"}
+      - {id: 3, opts: {shared_folder_uid: "{{ res }}", folder_path: ["{{ root_name }}", "{{ nested_name }}"]}, want_uid: "{{ ksm1673_deep_subfolder }}"}
+      - {id: 4, opts: {folder_name: "{{ shared_folder_name }}"}, want_uid: "{{ res }}"}
+      - {id: 5, opts: {shared_folder_uid: "{{ res }}", subfolder_uid: "{{ ksm1673_deep_subfolder }}"}, want_uid: "{{ ksm1673_deep_subfolder }}"}
+      - {id: 6, opts: {shared_folder_uid: "{{ res }}", folder_name: "{{ duplicate_name }}"}, want_err: "Found "}
+      - {id: 7, opts: {shared_folder_uid: "{{ res }}", folder_name: "R44 No Such Folder"}, want_err: "No folder named"}
+
+  tasks:
+    - name: Check the seeded folder tree
+      include_tasks: r44_preconditions.yml
+
+    - name: Run every lookup, with include_subfolders false and true
+      keeper_get_folder:
+        shared_folder_uid: "{{ item.0.opts.shared_folder_uid | default(omit) }}"
+        subfolder_uid: "{{ item.0.opts.subfolder_uid | default(omit) }}"
+        folder_name: "{{ item.0.opts.folder_name | default(omit) }}"
+        folder_path: "{{ item.0.opts.folder_path | default(omit) }}"
+        include_subfolders: "{{ item.1 }}"
+      loop: "{{ cases | product([false, true]) | list }}"
+      loop_control: {label: "case {{ item.0.id }} include_subfolders={{ item.1 }}"}
+      register: lookups
+      ignore_errors: true
+
+    - name: Assert every outcome
+      assert:
+        that:
+          - (item.item.0.want_uid is not defined) or (item is not failed and item.folder_uid == item.item.0.want_uid)
+          - (item.item.0.want_err is not defined) or (item is failed and item.item.0.want_err in item.msg)
+          - "'uniqueness cannot be confirmed' not in (item.msg | default(''))"
+        fail_msg: "case {{ item.item.0.id }} include_subfolders={{ item.item.1 }}: {{ item.msg | default(item.folder_uid | default('')) }}"
+      loop: "{{ lookups.results }}"
+      loop_control: {label: "case {{ item.item.0.id }} include_subfolders={{ item.item.1 }}"}

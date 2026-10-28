@@ -1,0 +1,41 @@
+---
+# R27.3: the plugins run on an ansible-core that was installed separately, and that ansible-core
+# is inside the supported range (KSM-1649).
+#
+# The package no longer installs ansible-core, so the user's own installation must work. This
+# playbook is that proof: it runs on whatever ansible-core the tester installed, checks the
+# version is 2.15.13 or later and not the 2.17 series (the range the collection declares), and
+# runs a Keeper action plugin that needs no vault access (keeper_password) through the
+# keepersecurity.keeper_secrets_manager collection.
+# Creates nothing in the vault.
+- name: "R27.3: Keeper plugins run on the separately installed, supported ansible-core"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+
+  tasks:
+    - name: Assert the running ansible-core is inside the supported range
+      assert:
+        that:
+          - ansible_version.full is version('2.15.13', '>=')
+          - ansible_version.major ~ '.' ~ ansible_version.minor != '2.17'
+        success_msg: "PASS [R27.3a]: ansible-core {{ ansible_version.full }} is inside >=2.15.13,!=2.17.*"
+        fail_msg: "FAIL [R27.3a]: ansible-core {{ ansible_version.full }} is outside the supported range"
+
+    - name: Generate a password with the Keeper action plugin
+      keeper_password:
+        length: 24
+      register: r27_pw
+      no_log: true
+
+    - name: Assert the plugin ran
+      assert:
+        that:
+          - r27_pw.password | length == 24
+        success_msg: "PASS [R27.3b]: keeper_password ran on ansible-core {{ ansible_version.full }}"
+        fail_msg: "FAIL [R27.3b]: keeper_password did not return a 24 character password"

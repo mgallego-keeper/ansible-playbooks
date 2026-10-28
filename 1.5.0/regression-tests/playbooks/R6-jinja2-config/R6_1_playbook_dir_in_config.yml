@@ -1,0 +1,104 @@
+---
+# R6.1: Jinja2 {{ playbook_dir }} in keeper_config_file
+# Regression for KSM-781: _template_value() must resolve Jinja2 before os.path.isfile()
+# Source: 1.3.0/KSM-781/playbooks/01_ksm781_jinja2_config_file.yml
+# QA setup: none beyond the variables. The playbook copies `config_file` to a temporary file named with the
+# templated path under test (so the path expansion is what is exercised) and removes it afterward.
+
+- name: "R6.1: Jinja2 {{ playbook_dir }} in keeper_config_file"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    # The exact bug scenario: {{ playbook_dir }} in config path
+    keeper_config_file: "{{ playbook_dir }}/../../../acceptance-tests/.r6_1_config.json"
+    shared_folder_uid: "{{ shared_folder_uid }}"
+
+  tasks:
+    - name: Make sure the directory in the templated path exists
+      file:
+        path: "{{ keeper_config_file | dirname }}"
+        state: directory
+
+    - name: Write a temporary config at the templated path under test
+      copy:
+        src: "{{ config_file }}"
+        dest: "{{ keeper_config_file }}"
+        remote_src: yes
+        mode: "0600"
+      no_log: true
+
+    - block:
+      - name: Assert config path resolved (no raw Jinja2)
+        assert:
+          that:
+            - keeper_config_file is not search('\{\{')
+            - keeper_config_file is not search('\}\}')
+          success_msg: "PASS [R6.1a]: Config path resolved to {{ keeper_config_file }}"
+          fail_msg: "FAIL [R6.1a]: keeper_config_file still contains raw Jinja2: {{ keeper_config_file }}"
+
+      - name: Connect via keeper_info ({{ playbook_dir }} config path)
+        keeper_info:
+        register: info_result
+
+      - name: Assert plugin connected with templated path
+        assert:
+          that:
+            - info_result.record_type_list is defined
+            - info_result.record_type_list | length > 0
+          success_msg: "PASS [R6.1b]: keeper_info succeeded with {{ '{{' }} playbook_dir {{ '}}' }} config path"
+          fail_msg: "FAIL [R6.1b]: keeper_info failed — Jinja2 path not resolved"
+
+      - name: Create record (validates full CRUD with templated config)
+        keeper_create:
+          shared_folder_uid: "{{ shared_folder_uid }}"
+          record_type: login
+          title: "R6.1 Jinja2 Config Test - {{ now(fmt='%Y%m%d_%H%M%S') }}"
+          fields:
+            - type: login
+              value: "r9_1_test_user"
+        register: created
+
+      - name: Assert record created with templated config path
+        assert:
+          that:
+            - created.record_uid is defined
+            - created.record_uid | length > 0
+          success_msg: "PASS [R6.1c]: keeper_create succeeded — UID: {{ created.record_uid }}"
+          fail_msg: "FAIL [R6.1c]: keeper_create failed with {{ '{{' }} playbook_dir {{ '}}' }} config path"
+
+      - name: Read back created record
+        keeper_get:
+          uid: "{{ created.record_uid }}"
+          field: login
+        register: get_result
+
+      - name: Assert read succeeded with templated config path
+        assert:
+          that:
+            - get_result.value == "r9_1_test_user"
+          success_msg: "PASS [R6.1d]: keeper_get succeeded with templated config path"
+          fail_msg: "FAIL [R6.1d]: keeper_get failed — got '{{ get_result.value | default('') }}'"
+
+      - name: Lookup plugin with templated config path
+        set_fact:
+          lookup_val: "{{ lookup('keeper', uid=created.record_uid, field='login') }}"
+
+      - name: Assert lookup succeeded with templated config path
+        assert:
+          that:
+            - lookup_val == "r9_1_test_user"
+          success_msg: "PASS [R6.1e]: Lookup plugin succeeded with templated config path"
+          fail_msg: "FAIL [R6.1e]: Lookup returned '{{ lookup_val }}'"
+
+      - name: Cleanup
+        keeper_remove:
+          uid: "{{ created.record_uid }}"
+        ignore_errors: yes
+
+      always:
+        - name: Remove the temporary config
+          file:
+            path: "{{ keeper_config_file }}"
+            state: absent

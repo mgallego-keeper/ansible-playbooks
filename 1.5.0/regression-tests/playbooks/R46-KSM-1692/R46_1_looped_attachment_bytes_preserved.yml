@@ -1,0 +1,38 @@
+---
+# R46.1 (KSM-1692): a looped keeper_get attachment download must finish (no queue-feeder hang on
+# Python 3.9/3.10 + ansible-core 2.15, no AttributeError on 2.16) and return exactly the same bytes
+# as the non-looped download. On Python 3.11+ this is a no-regression guard.
+- name: "R46.1: looped attachment download preserves bytes"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    keeper_use_cache: false
+
+  tasks:
+    - name: Looped attachment download
+      keeper_get:
+        uid: "{{ attachment_record_uid }}"
+        file: "{{ item }}"
+      loop: ["{{ attachment_file_name }}"]
+      register: looped
+      no_log: true
+
+    - name: Scalar attachment download (control)
+      keeper_get:
+        uid: "{{ attachment_record_uid }}"
+        file: "{{ attachment_file_name }}"
+      register: scalar
+      no_log: true
+
+    - name: Verify one result and identical bytes
+      assert:
+        that:
+          - looped.results | length == 1
+          - (looped.results[0].value | b64encode) == (scalar.value | b64encode)
+          - (scalar.value | b64encode | length) > 0
+        success_msg: "PASS [R46.1]: looped attachment finished with exact bytes"
+        fail_msg: "FAIL [R46.1]: looped attachment bytes differ or result missing"
+      no_log: true
