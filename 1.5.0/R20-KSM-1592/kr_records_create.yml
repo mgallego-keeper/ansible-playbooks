@@ -1,0 +1,34 @@
+---
+# Shared setup for the R18 (KSM-1592) playbooks. Included with include_tasks.
+# Expects: kr_tag (string), shared_folder_uid, kr_secrets (dict from kr_secrets.json).
+# Creates four login records (plain, special-character, multiline PEM, non-ASCII passwords)
+# and one birthCertificate record whose birthDate is a number (the non-string field).
+- name: Create the four password records (plain, special, pem, unicode)
+  keeper_create:
+    shared_folder_uid: "{{ shared_folder_uid }}"
+    record_type: login
+    title: "KSMV-coll-{{ kr_tag }}-{{ item.key }}-{{ now(fmt='%Y%m%d_%H%M%S') }}"
+    fields:
+      - type: login
+        value: "u_{{ item.key }}"
+      - type: password
+        value: "{{ item.value }}"
+  loop: "{{ kr_secrets | dict2items | rejectattr('key', 'equalto', 'number') | list }}"
+  register: kr_created_pw
+  no_log: true
+
+- name: Create the record with a non-string (numeric) field
+  keeper_create:
+    shared_folder_uid: "{{ shared_folder_uid }}"
+    record_type: birthCertificate
+    title: "KSMV-coll-{{ kr_tag }}-number-{{ now(fmt='%Y%m%d_%H%M%S') }}"
+    fields:
+      - type: birthDate
+        value: "{{ kr_secrets.number }}"
+  register: kr_created_num
+  no_log: true
+
+- name: Remember the uids (a uid is not a secret)
+  set_fact:
+    kr_pw_uids: "{{ kr_created_pw.results | map(attribute='record_uid') | list }}"
+    kr_num_uid: "{{ kr_created_num.record_uid }}"

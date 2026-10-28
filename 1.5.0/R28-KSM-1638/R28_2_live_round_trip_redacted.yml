@@ -1,0 +1,148 @@
+---
+# R28.2: live round trip with keeper_redact active: create a record, read it back, check the
+# secret and the connection settings are masked in the console output, remove the record
+# (KSM-1638, together with the KSM-1592 result masking it builds on).
+#
+# What this does: keeper_create makes a throwaway login record in shared_folder_uid with a
+# generated password. kt_inner_live.yml then runs as its own ansible-playbook process with
+# keeper_redact as the stdout callback, reads the record with keeper_get and keeper_get_record,
+# and prints the results with made-up keeper_token and keeper_record_cache_secret values set.
+# The check asserts the real password and the two settings never appear in the captured
+# output, that **** does, and that the three tasks ran ok (so the output holds a real
+# read-back, not an empty result). keeper_remove deletes the record in an always: section
+# (retried, because QA throttles and a failed cleanup would leave the record behind),
+# and a final keeper_get_record by uid must fail, which proves the vault is back where it started.
+- name: "R28.2: live keeper_get with keeper_redact masks the secret and the connection settings"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    kt_callback: "{{ lookup('env', 'KR_CALLBACK') | default(('keeper_redact' if (surface | default('pip')) == 'pip' else 'keepersecurity.keeper_secrets_manager.keeper_redact'), true) }}"
+    kt_title: "KSMV-R28_2-{{ kt_run_id }}"
+    kt_token_value: "US:KT-TOKEN-{{ kt_run_id }}"
+    kt_cache_value: "KT-CACHESECRET-{{ kt_run_id }}"
+
+  tasks:
+    - name: Fix the run id once (a vars entry that calls now() is evaluated again at each use)
+      set_fact:
+        kt_run_id: "{{ now(fmt='%Y%m%d_%H%M%S') }}"
+
+    - name: Generate the password once (a vars entry would be evaluated again at each use)
+      set_fact:
+        kt_password: "Kt{{ lookup('password', '/dev/null length=24 chars=ascii_letters,digits') }}"
+      no_log: true
+
+    - name: Run the scenario and always clean up
+      block:
+        - name: Create the throwaway record
+          keeper_create:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            record_type: login
+            title: "{{ kt_title }}"
+            fields:
+              - type: login
+                value: "kt_user"
+              - type: password
+                value: "{{ kt_password }}"
+          register: kt_created
+          no_log: true
+
+        - name: Make a scratch directory for captured output
+          tempfile:
+            state: directory
+            suffix: ksmv_r20_2
+          register: kt_dir
+
+        - name: Run the inner playbook with keeper_redact as the stdout callback
+          shell: >-
+            {{ ap_path | default('/usr/local/bin/ansible-playbook' if (surface | default('pip')) in ['tower', 'awx'] else (ansible_playbook_python | dirname ~ '/ansible-playbook')) }} {{ playbook_dir }}/kt_inner_live.yml {{ item.flag }}
+            -e {{ {'keeper_config_file': config_file, 'kt_uid': kt_created.record_uid, 'kt_token': kt_token_value, 'kt_cache_secret': kt_cache_value} | to_json | quote }}
+            > {{ kt_dir.path }}/out_{{ item.name }}.txt 2>&1
+          environment:
+            ANSIBLE_STDOUT_CALLBACK: "{{ kt_callback }}"
+            ANSIBLE_NOCOLOR: "1"
+            KSM_CONFIG_SKIP_MODE_WARNING: "TRUE"
+            ANSIBLE_INVENTORY_UNPARSED_FAILED: "False"
+            OBJC_DISABLE_INITIALIZE_FORK_SAFETY: "YES"
+          loop:
+            - {name: default, flag: ""}
+            - {name: v, flag: "-v"}
+          register: kt_runs
+          changed_when: false
+          failed_when: false
+
+        - name: Assert the inner runs completed
+          assert:
+            that: item.rc == 0
+            fail_msg: "FAIL [R28.2 setup]: inner run {{ item.item.name }} exited {{ item.rc }}"
+            quiet: true
+          loop: "{{ kt_runs.results }}"
+          loop_control:
+            label: "{{ item.item.name }}"
+
+        - name: Read the captured output
+          slurp:
+            src: "{{ kt_dir.path }}/out_{{ item }}.txt"
+          loop: [default, v]
+          register: kt_out
+
+        - name: Assert the password and the settings are masked in each output
+          vars:
+            kt_text: "{{ item.content | b64decode }}"
+          assert:
+            that:
+              - "'****' in kt_text"
+              - kt_password not in kt_text
+              - kt_token_value not in kt_text
+              - kt_cache_value not in kt_text
+              - "'_secrets' not in (kt_text | regex_replace('keeper_secrets_manager', ''))"
+            success_msg: "PASS [R28.2 {{ item.item }}]: password, keeper_token and keeper_record_cache_secret absent, **** present"
+            fail_msg: "FAIL [R28.2 {{ item.item }}]: password leaked={{ kt_password in kt_text }} token leaked={{ kt_token_value in kt_text }} cache secret leaked={{ kt_cache_value in kt_text }}"
+          loop: "{{ kt_out.results }}"
+          loop_control:
+            label: "{{ item.item }}"
+
+        - name: Assert the -v output shows the reads really ran against the vault
+          vars:
+            kt_text: "{{ (kt_out.results | selectattr('item', 'equalto', 'v') | first).content | b64decode }}"
+          assert:
+            that:
+              - "kt_text.count('ok: [localhost]') == 3"
+              - "'failed=0' in kt_text"
+            success_msg: "PASS [R28.2 read-back]: keeper_get, keeper_get_record and debug all ran ok in the -v output, so the masked output is a real read-back"
+            fail_msg: "FAIL [R28.2 read-back]: the -v output does not show three ok tasks and failed=0"
+
+      always:
+        - name: Remove the throwaway record
+          keeper_remove:
+            uid: "{{ kt_created.record_uid }}"
+          register: kt_removed
+          retries: 6
+          delay: 20
+          until: kt_removed is not failed
+          when: kt_created is defined and kt_created.record_uid is defined
+          ignore_errors: true
+          no_log: true
+
+        - name: Remove the scratch directory
+          file:
+            path: "{{ kt_dir.path }}"
+            state: absent
+          when: kt_dir is defined and kt_dir.path is defined
+
+    - name: Confirm the record is gone from the vault
+      keeper_get_record:
+        uid: "{{ kt_created.record_uid }}"
+      register: kt_after
+      ignore_errors: true
+      no_log: true
+
+    - name: Assert the vault is back where it started
+      assert:
+        that: kt_after is failed
+        success_msg: "PASS [R28.2 cleanup]: keeper_get_record on the removed record fails, the vault is back to baseline"
+        fail_msg: "FAIL [R28.2 cleanup]: the removed record can still be read"

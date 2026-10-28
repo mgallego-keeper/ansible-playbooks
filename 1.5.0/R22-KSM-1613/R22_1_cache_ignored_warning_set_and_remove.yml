@@ -1,0 +1,191 @@
+---
+# R22.1: keeper_set and keeper_remove still read and change the live vault when a task passes
+# "cache" (KSM-1613). Both plugins always use the live vault and never consult a registered cache,
+# so a cache= argument must not change what the task does. This playbook proves the save and the
+# delete really happen, with and without cache=.
+#
+# It does NOT assert the warning text: a task cannot see its own display.warning() output in its
+# result. R22_2 checks that the warning appears in the run output, using an inner ansible-playbook run.
+- name: "R22.1: keeper_set and keeper_remove behave the same with and without cache="
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+
+  tasks:
+    - name: Compute stable throwaway titles for this run
+      set_fact:
+        r22_set_title: "R22.1 Set Target - {{ now(fmt='%Y%m%d_%H%M%S') }}"
+        r22_remove_title: "R22.1 Remove Target - {{ now(fmt='%Y%m%d_%H%M%S') }}"
+        r22_control_set_title: "R22.1 Control Set Target - {{ now(fmt='%Y%m%d_%H%M%S') }}"
+        r22_control_remove_title: "R22.1 Control Remove Target - {{ now(fmt='%Y%m%d_%H%M%S') }}"
+
+    - name: Generate a secret to encrypt the record cache with
+      keeper_password:
+        length: 64
+      register: r22_cache_secret_gen
+      no_log: true
+
+    - name: Store the cache secret as keeper_record_cache_secret
+      set_fact:
+        keeper_record_cache_secret: "{{ r22_cache_secret_gen.password }}"
+      no_log: true
+
+    - name: Create the keeper_set cache-warning target record
+      keeper_create:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        record_type: login
+        title: "{{ r22_set_title }}"
+        fields:
+          - type: login
+            value: "r22_1_original_value"
+      register: r22_set_target
+      no_log: true
+
+    - name: Create the keeper_remove cache-warning target record
+      keeper_create:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        record_type: login
+        title: "{{ r22_remove_title }}"
+        fields:
+          - type: login
+            value: "r22_1_remove_me"
+      register: r22_remove_target
+      no_log: true
+
+    - name: Create the keeper_set control (no-cache) target record
+      keeper_create:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        record_type: login
+        title: "{{ r22_control_set_title }}"
+        fields:
+          - type: login
+            value: "r22_1_control_original_value"
+      register: r22_control_set_target
+      no_log: true
+
+    - name: Create the keeper_remove control (no-cache) target record
+      keeper_create:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        record_type: login
+        title: "{{ r22_control_remove_title }}"
+        fields:
+          - type: login
+            value: "r22_1_control_remove_me"
+      register: r22_control_remove_target
+      no_log: true
+
+    - name: Build an encrypted cache of the set/remove target records
+      keeper_cache_records:
+        uids:
+          - "{{ r22_set_target.record_uid }}"
+          - "{{ r22_remove_target.record_uid }}"
+      register: r22_cache
+      no_log: true
+
+    - name: "CASE 1: keeper_set with cache= set — behavior must be unchanged"
+      keeper_set:
+        uid: "{{ r22_set_target.record_uid }}"
+        field: login
+        value: "r22_1_updated_value"
+        cache: "{{ r22_cache.cache }}"
+      register: r22_set_result
+      no_log: true
+
+    - name: "CASE 1: assert the save against the live vault still really happened"
+      assert:
+        that:
+          - r22_set_result.changed
+          - r22_set_result.updated
+        success_msg: "PASS [R22.1 CASE 1]: keeper_set with cache= still saved to the live vault."
+        fail_msg: "FAIL [R22.1 CASE 1]: keeper_set with cache= did not report a real save — got {{ r22_set_result }}"
+
+    - name: "CASE 1: independently confirm the live value actually changed"
+      keeper_get:
+        uid: "{{ r22_set_target.record_uid }}"
+        field: login
+      register: r22_set_live_value
+      no_log: true
+
+    - name: "CASE 1: assert the live-read value matches what keeper_set wrote"
+      assert:
+        that:
+          - r22_set_live_value.value == "r22_1_updated_value"
+        success_msg: "PASS [R22.1 CASE 1]: live vault read confirms the new value was persisted."
+        fail_msg: "FAIL [R22.1 CASE 1]: live vault value does not match what keeper_set wrote."
+
+    - name: "CASE 2: keeper_remove with cache= set — behavior must be unchanged"
+      keeper_remove:
+        uid: "{{ r22_remove_target.record_uid }}"
+        cache: "{{ r22_cache.cache }}"
+      register: r22_remove_result
+      no_log: true
+
+    - name: "CASE 2: assert the delete against the live vault still really happened"
+      assert:
+        that:
+          - r22_remove_result.changed
+        success_msg: "PASS [R22.1 CASE 2]: keeper_remove with cache= still deleted from the live vault."
+        fail_msg: "FAIL [R22.1 CASE 2]: keeper_remove with cache= did not report changed:true — got {{ r22_remove_result }}"
+
+    - name: "CASE 2: independently confirm the record is really gone"
+      keeper_get_record:
+        uid: "{{ r22_remove_target.record_uid }}"
+      register: r22_remove_live_check
+      ignore_errors: true
+      no_log: true
+
+    - name: "CASE 2: assert the live follow-up lookup fails because the record is really gone"
+      assert:
+        that:
+          - r22_remove_live_check is failed
+          - "'could not be found' in r22_remove_live_check.msg"
+        success_msg: "PASS [R22.1 CASE 2]: live vault confirms the record no longer exists."
+        fail_msg: "FAIL [R22.1 CASE 2]: record still appears to exist after keeper_remove."
+
+    - name: "CASE 3 (control): keeper_set with cache omitted — must behave normally"
+      keeper_set:
+        uid: "{{ r22_control_set_target.record_uid }}"
+        field: login
+        value: "r22_1_control_updated_value"
+      register: r22_control_set_result
+      no_log: true
+
+    - name: "CASE 3: assert the no-cache save behaves correctly"
+      assert:
+        that:
+          - r22_control_set_result.changed
+          - r22_control_set_result.updated
+        success_msg: "PASS [R22.1 CASE 3]: keeper_set without cache behaves normally."
+        fail_msg: "FAIL [R22.1 CASE 3]: keeper_set without cache did not save correctly."
+
+    - name: "CASE 4 (control): keeper_remove with cache omitted — must behave normally"
+      keeper_remove:
+        uid: "{{ r22_control_remove_target.record_uid }}"
+      register: r22_control_remove_result
+      no_log: true
+
+    - name: "CASE 4: assert the no-cache delete behaves correctly"
+      assert:
+        that:
+          - r22_control_remove_result.changed
+        success_msg: "PASS [R22.1 CASE 4]: keeper_remove without cache behaves normally."
+        fail_msg: "FAIL [R22.1 CASE 4]: keeper_remove without cache did not delete correctly."
+
+    - name: Cleanup the CASE 1 set-target record (still exists, cache case)
+      keeper_remove:
+        uid: "{{ r22_set_target.record_uid }}"
+      ignore_errors: true
+      no_log: true
+
+    - name: Cleanup the CASE 3 control-set-target record (still exists, no-cache case)
+      keeper_remove:
+        uid: "{{ r22_control_set_target.record_uid }}"
+      ignore_errors: true
+      no_log: true
+    # CASE 2's remove target and CASE 4's control-remove target are already deleted by the
+    # test itself; nothing left to clean up for those two.

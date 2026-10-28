@@ -1,0 +1,453 @@
+---
+# R35.1: folder actions under no_log keep decrypted folder names out of all output (KSM-1664).
+#
+# Before the fix, the folder actions (keeper_create, keeper_create_folder, keeper_get_folder,
+# keeper_update_folder, keeper_delete_folder) printed decrypted folder names, new names, sibling hints and
+# private paths in errors, in display.warning text, in -vvv text and through the SDK logger, also when the task
+# had no_log: true. The keeper_redact callback cannot cover the SDK logger or the default callback. After the
+# fix the action resolves privacy from its own task: a no_log task fails with the fixed text "The folder
+# operation failed. Diagnostic details are hidden because no_log is enabled." and prints no name anywhere, while
+# a task with no_log: false still shows the detail, and successful return values do not change.
+#
+# Run it with: -e config_file=<KSM config JSON> -e shared_folder_uid=<writable classic shared folder UID>
+# The Python that runs ansible-playbook needs the keeper-secrets-manager-core package.
+#
+# Raw pip / local surface note: this playbook uses collections: [keepersecurity.keeper_secrets_manager] and
+# short plugin names. On a raw pip install (plugins loaded from action_plugins= in ansible.cfg, found by
+# ansible-playbook from the current directory) set ANSIBLE_COLLECTIONS_PATH to an EMPTY directory, so that a
+# stale collection under ~/.ansible/collections cannot shadow the code under test. Prove which code ran with
+# ANSIBLE_DEBUG ("Loading ActionModule" lines).
+#
+# What this does: makes a parent folder K1664-p-<run id>, then runs a nested ansible-playbook twice, once with
+# the default callback and once with -vvv, each with its own unique marker strings (SECRETNAME for the no_log
+# tasks, PUBLICNAME for the no_log: false tasks). The inner play, with ignore_errors, does:
+#   S1-S4  no_log false: create, get by name, rename, create a record in the folder. Return values are right.
+#   N1-N3  no_log true: create two sibling folders and a record in one of them
+#   P1     no_log true: rename to the same name (the -vvv "nothing to rename" text named the folder)
+#   P2     no_log true: rename to a sibling's name (the sibling warning named both folders)
+#   F1-F5  no_log true: padded name, get of a missing name, delete of a non-empty folder without force, create
+#          under a missing subfolder, record under a missing subfolder. Each result msg must be the fixed text
+#          (Ansible adds the prefix "Unexpected failure during module execution: " when the action raises, or "Task failed: " on ansible-core 2.21 and later).
+#   F1p-F5p  the same five with no_log false: the detail (the PUBLICNAME marker) must still be shown.
+# The outer play then asserts, for both runs: no SECRETNAME text anywhere in stdout and stderr (messages and
+# tracebacks), the fixed text five times, the PUBLICNAME marker in the public failures, correct return values.
+# Pace: calls to QA US are spaced by r35_pace seconds because QA US answers HTTP 429 when they come too fast.
+# Add -e r35_show_output=true to print the full output of both inner runs (to see what leaked before the fix).
+# Cleanup (always): deletes the parent folder with force_deletion by its exact UID after checking that its name
+# starts with K1664-p-, which removes the subfolders and records the inner play made.
+- name: "R35.1: no_log folder actions print no folder name in any output"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    r35_pace: 5
+    # The fixed text of a private failure, with an optional Ansible prefix when the action raises.
+    r35_pat: "private_msg=(?:(?:Unexpected failure during module execution|Task failed): )?The folder operation failed[.] Diagnostic details are hidden because no_log is enabled[.]"
+
+  tasks:
+    - name: Fix the run id once
+      set_fact:
+        r35_run: "{{ now(fmt='%Y%m%d%H%M%S') }}"
+
+    - name: Make a scratch directory
+      tempfile:
+        state: directory
+        prefix: r35_1_
+      register: r35_tmp
+
+    - name: Run the scenario and always clean up
+      block:
+        - name: Write the inner play
+          copy:
+            dest: "{{ r35_tmp.path }}/inner.yml"
+            mode: "0600"
+            content: |
+              - hosts: localhost
+                connection: local
+                gather_facts: false
+                collections:
+                  - keepersecurity.keeper_secrets_manager
+                vars:
+                  keeper_config_file: "{% raw %}{{ config_file }}{% endraw %}"
+                tasks:
+                  - name: "S1 public create"
+                    keeper_create_folder:
+                      shared_folder_uid: "{% raw %}{{ root }}{% endraw %}"
+                      subfolder_uid: "{% raw %}{{ parent }}{% endraw %}"
+                      folder_name: "{% raw %}{{ pub ~ '-a' }}{% endraw %}"
+                    register: s1
+                    no_log: false
+
+                  - name: pace
+                    pause:
+                      seconds: "{% raw %}{{ pace }}{% endraw %}"
+
+                  - name: "S2 public get by name"
+                    keeper_get_folder:
+                      shared_folder_uid: "{% raw %}{{ root }}{% endraw %}"
+                      subfolder_uid: "{% raw %}{{ parent }}{% endraw %}"
+                      folder_name: "{% raw %}{{ pub ~ '-a' }}{% endraw %}"
+                    register: s2
+                    no_log: false
+
+                  - name: pace
+                    pause:
+                      seconds: "{% raw %}{{ pace }}{% endraw %}"
+
+                  - name: "S3 public rename"
+                    keeper_update_folder:
+                      folder_uid: "{% raw %}{{ s1.folder_uid }}{% endraw %}"
+                      new_folder_name: "{% raw %}{{ pub ~ '-b' }}{% endraw %}"
+                    register: s3
+                    no_log: false
+
+                  - name: pace
+                    pause:
+                      seconds: "{% raw %}{{ pace }}{% endraw %}"
+
+                  - name: "S4 public record in folder"
+                    keeper_create:
+                      shared_folder_uid: "{% raw %}{{ root }}{% endraw %}"
+                      subfolder_uid: "{% raw %}{{ s1.folder_uid }}{% endraw %}"
+                      record_type: login
+                      title: "{% raw %}{{ 'K1664-rec-' ~ suffix }}{% endraw %}"
+                      login: "k1664"
+                      generate_password: true
+                    register: s4
+                    no_log: false
+
+                  - name: pace
+                    pause:
+                      seconds: "{% raw %}{{ pace }}{% endraw %}"
+
+                  - name: "N1 private create"
+                    keeper_create_folder:
+                      shared_folder_uid: "{% raw %}{{ root }}{% endraw %}"
+                      subfolder_uid: "{% raw %}{{ parent }}{% endraw %}"
+                      folder_name: "{% raw %}{{ sec ~ '-a' }}{% endraw %}"
+                    register: n1
+                    no_log: true
+
+                  - name: pace
+                    pause:
+                      seconds: "{% raw %}{{ pace }}{% endraw %}"
+
+                  - name: "N2 private create sibling"
+                    keeper_create_folder:
+                      shared_folder_uid: "{% raw %}{{ root }}{% endraw %}"
+                      subfolder_uid: "{% raw %}{{ parent }}{% endraw %}"
+                      folder_name: "{% raw %}{{ sec ~ '-b' }}{% endraw %}"
+                    register: n2
+                    no_log: true
+
+                  - name: pace
+                    pause:
+                      seconds: "{% raw %}{{ pace }}{% endraw %}"
+
+                  - name: "P1 private no-op rename"
+                    keeper_update_folder:
+                      folder_uid: "{% raw %}{{ n1.folder_uid }}{% endraw %}"
+                      new_folder_name: "{% raw %}{{ sec ~ '-a' }}{% endraw %}"
+                    register: p1
+                    no_log: true
+
+                  - name: pace
+                    pause:
+                      seconds: "{% raw %}{{ pace }}{% endraw %}"
+
+                  - name: "P2 private rename to a sibling name"
+                    keeper_update_folder:
+                      folder_uid: "{% raw %}{{ n1.folder_uid }}{% endraw %}"
+                      new_folder_name: "{% raw %}{{ sec ~ '-b' }}{% endraw %}"
+                    register: p2
+                    no_log: true
+
+                  - name: pace
+                    pause:
+                      seconds: "{% raw %}{{ pace }}{% endraw %}"
+
+                  - name: "N3 record in the private folder"
+                    keeper_create:
+                      shared_folder_uid: "{% raw %}{{ root }}{% endraw %}"
+                      subfolder_uid: "{% raw %}{{ n1.folder_uid }}{% endraw %}"
+                      record_type: login
+                      title: "{% raw %}{{ 'K1664-rec2-' ~ suffix }}{% endraw %}"
+                      login: "k1664"
+                      generate_password: true
+                    register: n3
+                    no_log: true
+
+                  - name: pace
+                    pause:
+                      seconds: "{% raw %}{{ pace }}{% endraw %}"
+
+                  - name: "F1 blank-padded name, sec"
+                    keeper_create_folder:
+                      shared_folder_uid: "{% raw %}{{ root }}{% endraw %}"
+                      subfolder_uid: "{% raw %}{{ parent }}{% endraw %}"
+                      folder_name: "{% raw %}{{ sec ~ '-ws ' }}{% endraw %}"
+                    register: f1
+                    no_log: true
+                    ignore_errors: true
+
+                  - name: pace
+                    pause:
+                      seconds: "{% raw %}{{ pace }}{% endraw %}"
+
+                  - name: "F2 get a missing name, sec"
+                    keeper_get_folder:
+                      shared_folder_uid: "{% raw %}{{ root }}{% endraw %}"
+                      subfolder_uid: "{% raw %}{{ parent }}{% endraw %}"
+                      folder_name: "{% raw %}{{ sec ~ '-missing' }}{% endraw %}"
+                    register: f2
+                    no_log: true
+                    ignore_errors: true
+
+                  - name: pace
+                    pause:
+                      seconds: "{% raw %}{{ pace }}{% endraw %}"
+
+                  - name: "F3 delete a non-empty folder, sec"
+                    keeper_delete_folder:
+                      folder_uid: "{% raw %}{{ n1.folder_uid }}{% endraw %}"
+                    register: f3
+                    no_log: true
+                    ignore_errors: true
+
+                  - name: pace
+                    pause:
+                      seconds: "{% raw %}{{ pace }}{% endraw %}"
+
+                  - name: "F4 create under a missing subfolder, sec"
+                    keeper_create_folder:
+                      shared_folder_uid: "{% raw %}{{ root }}{% endraw %}"
+                      subfolder_uid: "AAAAAAAAAAAAAAAAAAAAAA"
+                      folder_name: "{% raw %}{{ sec ~ '-bad' }}{% endraw %}"
+                    register: f4
+                    no_log: true
+                    ignore_errors: true
+
+                  - name: pace
+                    pause:
+                      seconds: "{% raw %}{{ pace }}{% endraw %}"
+
+                  - name: "F5 record under a missing subfolder, sec"
+                    keeper_create:
+                      shared_folder_uid: "{% raw %}{{ root }}{% endraw %}"
+                      subfolder_uid: "AAAAAAAAAAAAAAAAAAAAAA"
+                      record_type: login
+                      title: "{% raw %}{{ sec ~ '-rec' }}{% endraw %}"
+                      login: "k1664"
+                    register: f5
+                    no_log: true
+                    ignore_errors: true
+
+                  - name: pace
+                    pause:
+                      seconds: "{% raw %}{{ pace }}{% endraw %}"
+
+                  - name: "F1 blank-padded name, pub"
+                    keeper_create_folder:
+                      shared_folder_uid: "{% raw %}{{ root }}{% endraw %}"
+                      subfolder_uid: "{% raw %}{{ parent }}{% endraw %}"
+                      folder_name: "{% raw %}{{ pub ~ '-ws ' }}{% endraw %}"
+                    register: f1p
+                    no_log: false
+                    ignore_errors: true
+
+                  - name: pace
+                    pause:
+                      seconds: "{% raw %}{{ pace }}{% endraw %}"
+
+                  - name: "F2 get a missing name, pub"
+                    keeper_get_folder:
+                      shared_folder_uid: "{% raw %}{{ root }}{% endraw %}"
+                      subfolder_uid: "{% raw %}{{ parent }}{% endraw %}"
+                      folder_name: "{% raw %}{{ pub ~ '-missing' }}{% endraw %}"
+                    register: f2p
+                    no_log: false
+                    ignore_errors: true
+
+                  - name: pace
+                    pause:
+                      seconds: "{% raw %}{{ pace }}{% endraw %}"
+
+                  - name: "F3 delete a non-empty folder, pub"
+                    keeper_delete_folder:
+                      folder_uid: "{% raw %}{{ s1.folder_uid }}{% endraw %}"
+                    register: f3p
+                    no_log: false
+                    ignore_errors: true
+
+                  - name: pace
+                    pause:
+                      seconds: "{% raw %}{{ pace }}{% endraw %}"
+
+                  - name: "F4 create under a missing subfolder, pub"
+                    keeper_create_folder:
+                      shared_folder_uid: "{% raw %}{{ root }}{% endraw %}"
+                      subfolder_uid: "AAAAAAAAAAAAAAAAAAAAAA"
+                      folder_name: "{% raw %}{{ pub ~ '-bad' }}{% endraw %}"
+                    register: f4p
+                    no_log: false
+                    ignore_errors: true
+
+                  - name: pace
+                    pause:
+                      seconds: "{% raw %}{{ pace }}{% endraw %}"
+
+                  - name: "F5 record under a missing subfolder, pub"
+                    keeper_create:
+                      shared_folder_uid: "{% raw %}{{ root }}{% endraw %}"
+                      subfolder_uid: "AAAAAAAAAAAAAAAAAAAAAA"
+                      record_type: login
+                      title: "{% raw %}{{ pub ~ '-rec' }}{% endraw %}"
+                      login: "k1664"
+                    register: f5p
+                    no_log: false
+                    ignore_errors: true
+
+                  - name: pace
+                    pause:
+                      seconds: "{% raw %}{{ pace }}{% endraw %}"
+
+                  - name: "STATUS"
+                    debug:
+                      msg:
+                        - "S1 uid_set={% raw %}{{ s1.folder_uid | length > 0 }}{% endraw %} changed={% raw %}{{ s1.changed }}{% endraw %}"
+                        - "S2 found_uid_matches={% raw %}{{ s2.folder_uid == s1.folder_uid }}{% endraw %}"
+                        - "S3 changed={% raw %}{{ s3.changed }}{% endraw %} renamed_ok={% raw %}{{ s3.folder_name == pub ~ '-b' }}{% endraw %} previous_ok={% raw %}{{ s3.previous_folder_name == pub ~ '-a' }}{% endraw %}"
+                        - "S4 record_uid_set={% raw %}{{ s4.record_uid | length > 0 }}{% endraw %} changed={% raw %}{{ s4.changed }}{% endraw %}"
+                        - "N1 uid_set={% raw %}{{ n1.folder_uid | length > 0 }}{% endraw %} changed={% raw %}{{ n1.changed }}{% endraw %}"
+                        - "N2 uid_set={% raw %}{{ n2.folder_uid | length > 0 }}{% endraw %} changed={% raw %}{{ n2.changed }}{% endraw %}"
+                        - "P1 changed={% raw %}{{ p1.changed }}{% endraw %} failed={% raw %}{{ p1 is failed }}{% endraw %}"
+                        - "P2 changed={% raw %}{{ p2.changed }}{% endraw %} failed={% raw %}{{ p2 is failed }}{% endraw %} name_ok={% raw %}{{ p2.folder_name == sec ~ '-b' }}{% endraw %}"
+                        - "N3 record_uid_set={% raw %}{{ n3.record_uid | length > 0 }}{% endraw %}"
+                        - "F1 failed={% raw %}{{ f1 is failed }}{% endraw %} private_msg={% raw %}{{ f1.msg }}{% endraw %}"
+                        - "F2 failed={% raw %}{{ f2 is failed }}{% endraw %} private_msg={% raw %}{{ f2.msg }}{% endraw %}"
+                        - "F3 failed={% raw %}{{ f3 is failed }}{% endraw %} private_msg={% raw %}{{ f3.msg }}{% endraw %}"
+                        - "F4 failed={% raw %}{{ f4 is failed }}{% endraw %} private_msg={% raw %}{{ f4.msg }}{% endraw %}"
+                        - "F5 failed={% raw %}{{ f5 is failed }}{% endraw %} private_msg={% raw %}{{ f5.msg }}{% endraw %}"
+                        - "F1p failed={% raw %}{{ f1p is failed }}{% endraw %} public_msg={% raw %}{{ f1p.msg }}{% endraw %}"
+                        - "F2p failed={% raw %}{{ f2p is failed }}{% endraw %} public_msg={% raw %}{{ f2p.msg }}{% endraw %}"
+                        - "F3p failed={% raw %}{{ f3p is failed }}{% endraw %} public_msg={% raw %}{{ f3p.msg }}{% endraw %}"
+                        - "F4p failed={% raw %}{{ f4p is failed }}{% endraw %} public_msg={% raw %}{{ f4p.msg }}{% endraw %}"
+                        - "F5p failed={% raw %}{{ f5p is failed }}{% endraw %} public_msg={% raw %}{{ f5p.msg }}{% endraw %}"
+
+        - name: Create the parent folder
+          keeper_create_folder:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            folder_name: "K1664-p-{{ r35_run }}"
+          register: r35_parent
+          retries: 3
+          delay: 70
+          until: r35_parent is not failed
+
+        - name: Run the inner play twice, default callback and -vvv
+          command: >-
+            {{ ansible_playbook_python }} -m ansible.cli.playbook {{ r35_tmp.path }}/inner.yml {{ item.flag }}
+            -i localhost, -e ansible_python_interpreter={{ ansible_playbook_python }} -e config_file={{ config_file }}
+            -e root={{ shared_folder_uid }} -e parent={{ r35_parent.folder_uid }} -e pace={{ r35_pace }}
+            -e suffix={{ r35_run }}{{ item.id }}
+            -e sec=K1664-SECRETNAME-{{ r35_run }}{{ item.id }} -e pub=K1664-PUBLICNAME-{{ r35_run }}{{ item.id }}
+          args:
+            # The directory where ansible-playbook was started, so that a raw pip run finds its ansible.cfg.
+            chdir: "{{ lookup('env', 'PWD') }}"
+          environment:
+            ANSIBLE_NOCOLOR: "1"
+            ANSIBLE_HOME: "{{ r35_tmp.path }}/ahome"
+            KSM_CONFIG_SKIP_MODE_WARNING: "TRUE"
+            OBJC_DISABLE_INITIALIZE_FORK_SAFETY: "YES"
+            no_proxy: "*"
+          loop:
+            - { id: "d", flag: "" }
+            - { id: "v", flag: "-vvv" }
+          loop_control:
+            label: "{{ item.id }}"
+            pause: 70
+          register: r35_runs
+          changed_when: false
+          failed_when: false
+
+        - name: Show the inner output (only with -e r35_show_output=true)
+          debug:
+            msg: "{{ item.stdout_lines + ['--- stderr ---'] + item.stderr_lines }}"
+          loop: "{{ r35_runs.results }}"
+          loop_control:
+            label: "{{ item.item.id }}"
+          when: r35_show_output | default(false) | bool
+
+        - name: Assert each run finished and the private failures carry the fixed text only
+          assert:
+            that:
+              - item.stdout is search('failed=0')
+              - item.stdout is search('ignored=10')
+              - item.stdout | regex_findall(r35_pat) | length == 5
+              - item.stdout is search('S1 uid_set=True changed=True')
+              - item.stdout is search('S2 found_uid_matches=True')
+              - item.stdout is search('S3 changed=True renamed_ok=True previous_ok=True')
+              - item.stdout is search('S4 record_uid_set=True changed=True')
+              - item.stdout is search('N1 uid_set=True changed=True')
+              - item.stdout is search('N2 uid_set=True changed=True')
+              - item.stdout is search('P1 changed=False failed=False')
+              - item.stdout is search('P2 changed=True failed=False name_ok=True')
+              - item.stdout is search('N3 record_uid_set=True')
+            fail_msg: "FAIL [R35.1a]: run {{ item.item.id }} rc={{ item.rc }}"
+            quiet: true
+          loop: "{{ r35_runs.results }}"
+          loop_control:
+            label: "{{ item.item.id }}"
+
+        - name: Assert no SECRETNAME text reached stdout, stderr or a traceback
+          assert:
+            that:
+              - "('K1664-SECRETNAME' not in item.stdout) and ('K1664-SECRETNAME' not in item.stderr)"
+            fail_msg: "FAIL [R35.1b]: run {{ item.item.id }} printed the no_log folder name ({{ (item.stdout ~ item.stderr) | regex_findall('K1664-SECRETNAME') | length }} times)"
+            quiet: true
+          loop: "{{ r35_runs.results }}"
+          loop_control:
+            label: "{{ item.item.id }}"
+
+        - name: Assert the public failures still show the detail
+          assert:
+            that:
+              - item.stdout | regex_findall('public_msg=[^\n]*K1664-PUBLICNAME') | length >= 3
+            fail_msg: "FAIL [R35.1c]: run {{ item.item.id }}: the no_log false failures lost their detail"
+            quiet: true
+          loop: "{{ r35_runs.results }}"
+          loop_control:
+            label: "{{ item.item.id }}"
+
+        - name: Report
+          debug:
+            msg:
+              - "PASS [R35.1a]: run {{ item.item.id }}: return values are right, five private failures carry only the fixed text"
+              - "PASS [R35.1b]: run {{ item.item.id }}: SECRETNAME appears {{ (item.stdout ~ item.stderr) | regex_findall('K1664-SECRETNAME') | length }} times in stdout and stderr"
+              - "PASS [R35.1c]: run {{ item.item.id }}: no_log false failures keep the folder name ({{ item.stdout | regex_findall('public_msg=[^\\n]*K1664-PUBLICNAME') | length }} lines)"
+          loop: "{{ r35_runs.results }}"
+          loop_control:
+            label: "{{ item.item.id }}"
+
+      always:
+        - name: Delete the parent folder by its exact UID, after checking its name
+          block:
+            - name: Read the parent folder
+              keeper_get_folder:
+                shared_folder_uid: "{{ shared_folder_uid }}"
+                subfolder_uid: "{{ r35_parent.folder_uid }}"
+              register: r35_chk
+            - name: Delete it with its contents
+              keeper_delete_folder:
+                folder_uid: "{{ r35_parent.folder_uid }}"
+                force_deletion: true
+              when: r35_chk.folder_name is match('K1664-p-')
+          when: r35_parent is defined and r35_parent.folder_uid is defined
+
+        - name: Remove the scratch directory
+          file:
+            path: "{{ r35_tmp.path }}"
+            state: absent

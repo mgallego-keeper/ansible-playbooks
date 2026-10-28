@@ -1,0 +1,97 @@
+# R16.1: keeper_remove deletes a record and reports changed:true, and removing it again
+# (by UID or by its now-gone title) is idempotent -- changed:false, not a failure (KSM-1559).
+- name: "R16.1: keeper_remove idempotent delete"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    title: "R16-KSM-1559 Regression Remove Me"
+    keep_title: "R16-KSM-1559 Regression Keep"
+
+  tasks:
+    - name: Create the fixture record
+      keeper_create:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        record_type: login
+        title: "{{ title }}"
+        generate_password: true
+        fields:
+          - type: login
+            value: "r16-1@example.com"
+      register: fixture_record
+      no_log: true
+
+    - name: Create the sibling record that must survive the delete
+      keeper_create:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        record_type: login
+        title: "{{ keep_title }}"
+        generate_password: true
+        fields:
+          - type: login
+            value: "r16-1-keep@example.com"
+      register: keep_record
+      no_log: true
+
+    - name: Remove it by UID
+      keeper_remove:
+        uid: "{{ fixture_record.record_uid }}"
+      register: first_remove
+
+    - name: Assert the delete succeeded and reported changed
+      assert:
+        that:
+          - first_remove is not failed
+          - first_remove.changed == true
+          - first_remove.record_uid == fixture_record.record_uid
+        success_msg: "PASS [R16.1]: Deleted {{ first_remove.record_uid }}, changed=true"
+        fail_msg: "FAIL [R16.1]: {{ first_remove }}"
+
+    - name: Verify the sibling record still exists
+      keeper_get:
+        uid: "{{ keep_record.record_uid }}"
+        field: "login"
+      register: keep_check
+      no_log: true
+
+    - name: Assert the sibling record was not touched
+      assert:
+        that:
+          - keep_check is not failed
+        success_msg: "PASS [R16.1]: Sibling record untouched"
+        fail_msg: "FAIL [R16.1]: Sibling record check failed — {{ keep_check }}"
+
+    - name: Remove the same (now-gone) UID again
+      keeper_remove:
+        uid: "{{ fixture_record.record_uid }}"
+      register: second_remove
+
+    - name: Assert the second remove is idempotent
+      assert:
+        that:
+          - second_remove is not failed
+          - second_remove.changed == false
+        success_msg: "PASS [R16.1]: Idempotent re-remove by UID — changed=false, not a failure"
+        fail_msg: "FAIL [R16.1]: {{ second_remove }}"
+
+    - name: Remove by the now-gone title
+      keeper_remove:
+        title: "{{ title }}"
+      register: third_remove
+
+    - name: Assert removing by the gone title is also idempotent
+      assert:
+        that:
+          - third_remove is not failed
+          - third_remove.changed == false
+        success_msg: "PASS [R16.1]: Idempotent remove by now-gone title — changed=false, not a failure"
+        fail_msg: "FAIL [R16.1]: {{ third_remove }}"
+
+    - name: Cleanup sibling record
+      keeper_remove:
+        uid: "{{ keep_record.record_uid }}"
+      ignore_errors: yes

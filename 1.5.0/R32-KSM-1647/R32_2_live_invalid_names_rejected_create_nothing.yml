@@ -1,0 +1,249 @@
+---
+# R32.2: live keeper_create_folder rejects invalid folder names and creates nothing (KSM-1647).
+#
+# Before the fix, a folder_name that YAML read as an integer, float, boolean, list or dictionary, or that had
+# leading or trailing whitespace (for example the newline that a YAML block scalar keeps), was sent to the vault
+# as it was. The task reported changed=true, the stored name did not match the requested name, and every repeat
+# created another folder. After the fix the action fails before it contacts the vault.
+#
+# Run it with: -e config_file=<KSM config JSON> -e shared_folder_uid=<writable classic shared folder UID>
+#
+# Raw pip / local surface note: this playbook uses collections: [keepersecurity.keeper_secrets_manager] and
+# short plugin names. On a raw pip install (plugins loaded from action_plugins= in ansible.cfg) set
+# ANSIBLE_COLLECTIONS_PATH to an EMPTY directory, so that a stale collection under ~/.ansible/collections
+# cannot shadow the code under test. Prove which code ran with ANSIBLE_DEBUG ("Loading ActionModule" lines).
+#
+# Why the number and boolean names are literal tasks, not loop items: on ansible-core before 2.19, Ansible renders
+# "{{ item.value }}" in non-native mode, which turns an integer or a float into the string "123" or "1.5" before
+# the plugin sees it. On 2.19 and later a templated integer stays an integer and is rejected too (use
+# "{{ n | string }}" to keep it accepted). A literal "folder_name: 123" reaches the plugin as an integer on every
+# engine, which is the shape that KSM-1647 is about, so these cases stay literal.
+#
+# What this does: makes an empty parent folder K1647-p-<run id> in shared_folder_uid. Then, in that parent, it
+# runs keeper_create_folder with each invalid name, in normal mode and in check mode (every task must fail with
+# the exact message for its shape), and with a numeric name twice. Last it reads the parent's children back:
+# there must be none, and a valid name must still create in the same parent.
+# Cleanup (always): keeper_delete_folder with force_deletion removes the parent, and anything that a broken
+# build created inside it, by the parent's exact UID. keeper_get_folder by name must then fail.
+- name: "R32.2: live invalid folder names are rejected and create nothing"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    r32_not_string: "The folder_name option must be a string, but it is"
+    r32_padded: "has leading or trailing whitespace. Remove it. In YAML, a block scalar (| or >) keeps the newline at its end."
+    r32_cases:
+      - {id: list, value: [a], expect: "{{ r32_not_string }} a list. Put quotes around the value, or use the string filter."}
+      - {id: dict, value: {a: b}, expect: "{{ r32_not_string }} a dictionary. Put quotes around the value, or use the string filter."}
+      - {id: empty, value: "", expect: "The folder_name is blank. keeper_create_folder requires this value to be set."}
+      - {id: leading_space, value: " x", expect: "The folder_name ' x' {{ r32_padded }}"}
+      - {id: trailing_space, value: "x ", expect: "The folder_name 'x ' {{ r32_padded }}"}
+      - {id: leading_tab, value: "\tx", expect: "The folder_name '\\tx' {{ r32_padded }}"}
+      - {id: trailing_newline, value: "x\n", expect: "The folder_name 'x\\n' {{ r32_padded }}"}
+      - id: block_scalar_literal
+        value: |
+          x
+        expect: "The folder_name 'x\\n' {{ r32_padded }}"
+      - id: block_scalar_folded
+        value: >
+          x
+        expect: "The folder_name 'x\\n' {{ r32_padded }}"
+
+  tasks:
+    - name: Fix the run id once (a vars entry that calls now() is evaluated again at each use)
+      set_fact:
+        r32_run: "{{ now(fmt='%Y%m%d%H%M%S') }}"
+
+    - name: Set the parent name from the run id
+      set_fact:
+        r32_parent_name: "K1647-p-{{ r32_run }}"
+
+    - name: Run the scenario and always clean up
+      block:
+        - name: Create the empty parent folder
+          keeper_create_folder:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            folder_name: "{{ r32_parent_name }}"
+          register: r32_parent
+          retries: 3
+          delay: 70
+          until: r32_parent is not failed
+
+        - name: Literal integer name, normal mode
+          keeper_create_folder:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            subfolder_uid: "{{ r32_parent.folder_uid }}"
+            folder_name: 123
+          register: r32_int
+          ignore_errors: true
+
+        - name: Literal integer name, check mode
+          keeper_create_folder:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            subfolder_uid: "{{ r32_parent.folder_uid }}"
+            folder_name: 123
+          check_mode: true
+          register: r32_int_check
+          ignore_errors: true
+
+        - name: Literal float name, normal mode
+          keeper_create_folder:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            subfolder_uid: "{{ r32_parent.folder_uid }}"
+            folder_name: 1.5
+          register: r32_float
+          ignore_errors: true
+
+        - name: Literal float name, check mode
+          keeper_create_folder:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            subfolder_uid: "{{ r32_parent.folder_uid }}"
+            folder_name: 1.5
+          check_mode: true
+          register: r32_float_check
+          ignore_errors: true
+
+        - name: Literal boolean name, normal mode
+          keeper_create_folder:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            subfolder_uid: "{{ r32_parent.folder_uid }}"
+            folder_name: true
+          register: r32_bool
+          ignore_errors: true
+
+        - name: Literal boolean name, check mode
+          keeper_create_folder:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            subfolder_uid: "{{ r32_parent.folder_uid }}"
+            folder_name: true
+          check_mode: true
+          register: r32_bool_check
+          ignore_errors: true
+
+        - name: Assert the literal number and boolean names failed with their exact messages, in both modes
+          assert:
+            that:
+              - item.0.failed and item.1.failed
+              - item.0.changed is false and item.1.changed is false
+              - item.0.msg | default('') == item.2
+              - item.1.msg | default('') == item.2
+              - item.0.folder_uid is not defined and item.1.folder_uid is not defined
+            success_msg: "PASS [R32.2 {{ item.3 }}]: rejected in normal and check mode: {{ item.0.msg | default('') }}"
+            fail_msg: "FAIL [R32.2 {{ item.3 }}]: normal={{ item.0 | to_json }} check={{ item.1 | to_json }}"
+          loop:
+            - ["{{ r32_int }}", "{{ r32_int_check }}", "{{ r32_not_string }} a number (123). Put quotes around the value, or use the string filter.", int]
+            - ["{{ r32_float }}", "{{ r32_float_check }}", "{{ r32_not_string }} a number (1.5). Put quotes around the value, or use the string filter.", float]
+            - ["{{ r32_bool }}", "{{ r32_bool_check }}", "{{ r32_not_string }} a boolean (True). Put quotes around the value, or use the string filter.", bool]
+          loop_control:
+            label: "{{ item.3 }}"
+
+        - name: Create with each invalid name in normal mode
+          keeper_create_folder:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            subfolder_uid: "{{ r32_parent.folder_uid }}"
+            folder_name: "{{ item.value }}"
+          loop: "{{ r32_cases }}"
+          loop_control:
+            label: "{{ item.id }}"
+          register: r32_normal
+          ignore_errors: true
+
+        - name: Create with each invalid name in check mode
+          keeper_create_folder:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            subfolder_uid: "{{ r32_parent.folder_uid }}"
+            folder_name: "{{ item.value }}"
+          check_mode: true
+          loop: "{{ r32_cases }}"
+          loop_control:
+            label: "{{ item.id }}"
+          register: r32_check
+          ignore_errors: true
+
+        - name: Assert every invalid name failed with its exact message, in both modes
+          assert:
+            that:
+              - item.0.failed
+              - item.0.changed is false
+              - item.0.msg | default('') == item.1.expect
+              - item.0.folder_uid is not defined
+              - item.2.failed
+              - item.2.changed is false
+              - item.2.msg | default('') == item.1.expect
+              - item.2.folder_uid is not defined
+            success_msg: "PASS [R32.2 {{ item.1.id }}]: rejected in normal and check mode: {{ item.0.msg | default('') }}"
+            fail_msg: "FAIL [R32.2 {{ item.1.id }}]: normal={{ item.0 | to_json }} check={{ item.2 | to_json }}"
+          loop: "{{ r32_normal.results | zip(r32_cases, r32_check.results) | list }}"
+          loop_control:
+            label: "{{ item.1.id }}"
+
+        - name: Create with a numeric name twice (a broken build creates a duplicate each time)
+          keeper_create_folder:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            subfolder_uid: "{{ r32_parent.folder_uid }}"
+            folder_name: 123
+          loop: [1, 2]
+          register: r32_twice
+          ignore_errors: true
+
+        - name: Read the parent's children back
+          keeper_get_folder:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            subfolder_uid: "{{ r32_parent.folder_uid }}"
+            include_subfolders: true
+          register: r32_children
+
+        - name: Assert nothing was created
+          assert:
+            that:
+              - r32_twice.results | selectattr('failed') | list | length == 2
+              - r32_children.subfolders | length == 0
+            success_msg: "PASS [R32.2 nothing created]: the numeric name failed twice and the parent still has 0 children"
+            fail_msg: "FAIL [R32.2 nothing created]: twice={{ r32_twice.results | map(attribute='msg', default='') | list }} children={{ r32_children.subfolders | to_json }}"
+
+        - name: A valid name still creates in the same parent
+          keeper_create_folder:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            subfolder_uid: "{{ r32_parent.folder_uid }}"
+            folder_name: "K1647-ok-{{ r32_run }}"
+          register: r32_valid
+          retries: 3
+          delay: 70
+          until: r32_valid is not failed
+
+        - name: Assert the valid name created
+          assert:
+            that:
+              - r32_valid is changed
+              - r32_valid.folder_uid is string and r32_valid.folder_uid | length > 0
+            success_msg: "PASS [R32.2 control]: a valid name still creates ({{ r32_valid.folder_uid }})"
+            fail_msg: "FAIL [R32.2 control]: {{ r32_valid }}"
+
+      always:
+        - name: Delete the parent folder (and anything created inside it) by its exact UID
+          keeper_delete_folder:
+            folder_uid: "{{ r32_parent.folder_uid }}"
+            force_deletion: true
+          register: r32_deleted
+          retries: 3
+          delay: 70
+          until: r32_deleted is not failed
+          when: r32_parent is defined and r32_parent.folder_uid is defined
+          ignore_errors: true
+
+    - name: Confirm the parent folder is gone
+      keeper_get_folder:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        folder_name: "{{ r32_parent_name }}"
+      register: r32_gone
+      ignore_errors: true
+
+    - name: Assert the vault is back where it started
+      assert:
+        that: r32_gone is failed
+        success_msg: "PASS [R32.2 cleanup]: the parent folder K1647-p-{{ r32_run }} is gone"
+        fail_msg: "FAIL [R32.2 cleanup]: the parent folder is still there: {{ r32_gone }}"

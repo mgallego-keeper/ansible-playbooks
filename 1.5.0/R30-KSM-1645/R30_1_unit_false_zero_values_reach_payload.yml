@@ -1,0 +1,39 @@
+---
+# R30.1: the keeper_create unit tests for false and zero field values pass (KSM-1645).
+#
+# Before the fix, keeper_create turned every falsy field value (False, 0) into None, so the
+# helper built an empty value array while the task reported changed=True.
+#
+# What this does: runs tests/unit/plugins/action/test_keeper_create_fields.py from repo_path
+# with the Python that runs ansible-playbook (that Python needs pytest). The tests build the
+# record payload with the real helper, in both normal and check mode, for standard and custom
+# fields, and assert False -> [false], 0 -> [0], and that "", null, an omitted value and an empty
+# list still give an empty array. Nothing touches the vault. The test run writes no files into
+# the repository (no bytecode, no pytest cache).
+- name: "R30.1: unit tests for false and zero field values pass"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Run the keeper_create field value tests
+      command: >-
+        env -u ANSIBLE_CONFIG {{ ansible_playbook_python }} -m pytest tests/unit/plugins/action/test_keeper_create_fields.py
+        -q -p no:cacheprovider
+      args:
+        chdir: "{{ repo_path }}"
+      environment:
+        PYTHONDONTWRITEBYTECODE: "1"
+        KSM_CONFIG_SKIP_MODE_WARNING: "TRUE"
+      register: r30_unit
+      changed_when: false
+      failed_when: false
+
+    - name: Assert the tests ran and all passed
+      assert:
+        that:
+          - r30_unit.rc == 0
+          - "' passed' in r30_unit.stdout"
+          - "' failed' not in r30_unit.stdout"
+        success_msg: "PASS [R30.1]: {{ (r30_unit.stdout_lines | default([]) | last | default('')) }}"
+        fail_msg: "FAIL [R30.1]: rc={{ r30_unit.rc }} {{ (r30_unit.stdout_lines | default([]) | last | default('')) }} {{ (r30_unit.stderr_lines | default([]) | last | default('')) }} (the Python that runs ansible-playbook needs pytest and the packages in repo_path/requirements.txt: pip install pytest)"

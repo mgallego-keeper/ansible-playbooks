@@ -1,0 +1,37 @@
+---
+# Inner playbook for R28.1. Not a test by itself (the runner skips it: the name does not
+# start with A or R). The outer playbook runs it as its own ansible-playbook process with
+# the keeper_redact stdout callback (or the default callback, as a control) and inspects
+# what it printed. Nothing here talks to the vault.
+# Expects -e: kt_private_key (list), kt_config (dict), kt_token, kt_cache_secret, kt_client_id.
+- name: "KSM-1638 inner: Keeper connection settings printed to the console"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    keeper_private_key: "{{ kt_private_key }}"
+    keeper_config: "{{ kt_config }}"
+    keeper_token: "{{ kt_token }}"
+    keeper_record_cache_secret: "{{ kt_cache_secret }}"
+
+  tasks:
+    - name: debug a list under keeper_private_key and a dictionary under keeper_config
+      debug:
+        msg:
+          keeper_private_key: "{{ keeper_private_key }}"
+          keeper_config: "{{ keeper_config }}"
+
+    - name: debug keeper_token and keeper_record_cache_secret
+      debug:
+        msg:
+          keeper_token: "{{ keeper_token }}"
+          keeper_record_cache_secret: "{{ keeper_record_cache_secret }}"
+
+    - name: set_fact keeper_client_id
+      set_fact:
+        keeper_client_id: "{{ kt_client_id }}"
+
+    - name: set_fact a dictionary under keeper_config
+      set_fact:
+        keeper_config: "{{ kt_config }}"

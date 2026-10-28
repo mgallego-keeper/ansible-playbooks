@@ -1,0 +1,47 @@
+---
+# R33.3: the attachment request error unit tests pass (KSM-1672).
+#
+# Before the fix, a failed attachment request raised the requests error as it was, and the text of that error
+# holds the signed download URL (storage host, file path and the X-Amz query with the signature and the security
+# token). After the fix _proxy_credentials_hidden(kind="file") raises a fixed ConnectionError for the direct file
+# field and for the file notation.
+#
+# Run it with: -e repo_path=<integration/keeper_secrets_manager_ansible directory of the code under test>
+# The Python that runs ansible-playbook needs pytest and the keeper-secrets-manager-core package, and the code
+# under test installed (pip install of repo_path).
+#
+# Raw pip / local surface note: set ANSIBLE_COLLECTIONS_PATH to an EMPTY directory so that a stale collection
+# under ~/.ansible/collections cannot shadow the code under test.
+#
+# What this does: runs tests/keeper_proxy_redact_test.py from repo_path. The tests assert, for connection, TLS,
+# timeout, HTTP, invalid URL and encoding errors on both routes, the fixed message, the absence of any URL text in
+# str(), repr(), the traceback and the cause and context links, and a real playbook run against a loopback server.
+# Nothing touches the vault.
+- name: "R33.3: unit tests for attachment request errors pass"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Run the attachment request error tests
+      command: >-
+        env -u ANSIBLE_CONFIG {{ ansible_playbook_python }} -m pytest tests/keeper_proxy_redact_test.py -q -p no:cacheprovider
+      args:
+        chdir: "{{ repo_path }}"
+      environment:
+        PYTHONDONTWRITEBYTECODE: "1"
+        KSM_CONFIG_SKIP_MODE_WARNING: "TRUE"
+        OBJC_DISABLE_INITIALIZE_FORK_SAFETY: "YES"
+        no_proxy: "*"
+      register: r33_unit
+      changed_when: false
+      failed_when: false
+
+    - name: Assert the tests ran and all passed
+      assert:
+        that:
+          - r33_unit.rc == 0
+          - "' passed' in r33_unit.stdout"
+          - "' failed' not in r33_unit.stdout"
+        success_msg: "PASS [R33.3]: {{ (r33_unit.stdout_lines | default([]) | last | default('')) }}"
+        fail_msg: "FAIL [R33.3]: rc={{ r33_unit.rc }} {{ (r33_unit.stdout_lines | default([]) | last | default('')) }} {{ (r33_unit.stderr_lines | default([]) | last | default('')) }} (the Python that runs ansible-playbook needs pytest and the packages in repo_path/requirements.txt: pip install pytest)"

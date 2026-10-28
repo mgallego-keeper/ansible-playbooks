@@ -1,0 +1,133 @@
+---
+# R33.1: live attachment download still returns the right bytes by every route (KSM-1672).
+#
+# KSM-1672 changed how a failed attachment request is reported. This case guards the other half: a request that
+# succeeds must return the exact bytes of the file, by the direct file field (keeper_get file:), by the file
+# notation (keeper_get notation: keeper://UID/file/NAME) and by the keeper lookup.
+#
+# Run it with: -e config_file=<KSM config JSON> -e shared_folder_uid=<writable classic shared folder UID>
+# The Python that runs ansible-playbook needs the keeper-secrets-manager-core package (it uploads the file).
+#
+# Raw pip / local surface note: this playbook uses collections: [keepersecurity.keeper_secrets_manager] and
+# short plugin names. On a raw pip install (plugins loaded from action_plugins= and lookup_plugins= in
+# ansible.cfg) set ANSIBLE_COLLECTIONS_PATH to an EMPTY directory, so that a stale collection under
+# ~/.ansible/collections cannot shadow the code under test. Prove which code ran with ANSIBLE_DEBUG
+# ("Loading ActionModule" lines).
+#
+# What this does: creates the record K1672-<run id> with one attached file in shared_folder_uid (through the
+# SDK), reads the file back three ways, and compares each result with the uploaded text.
+# The lookup name differs by surface, see r33_lookup_name below.
+# Cleanup (always): deletes the record by its exact UID after checking that the title starts with K1672-, and
+# removes the scratch directory.
+- name: "R33.1: live attachment download returns the correct bytes"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    # The lookup name: 'keeper' on a raw pip install, keepersecurity.keeper_secrets_manager.keeper on a Galaxy
+    # collection or the Tower image (pass -e r33_lookup_name=... there).
+    r33_lookup_name: "{{ 'keeper' if (surface | default('pip')) == 'pip' else 'keepersecurity.keeper_secrets_manager.keeper' }}"
+
+  tasks:
+    - name: Fix the run id once
+      set_fact:
+        r33_run: "{{ now(fmt='%Y%m%d%H%M%S') }}"
+
+    - name: Make a scratch directory
+      tempfile:
+        state: directory
+        prefix: r33_1_
+      register: r33_tmp
+
+    - name: Run the scenario and always clean up
+      block:
+        - name: Write the helper that creates and deletes the record through the SDK
+          copy:
+            dest: "{{ r33_tmp.path }}/helper.py"
+            mode: "0600"
+            content: |
+              import json, sys, time
+              from keeper_secrets_manager_core import SecretsManager
+              from keeper_secrets_manager_core.storage import InMemoryKeyValueStorage
+              from keeper_secrets_manager_core.dto.dtos import RecordCreate, KeeperFileUpload
+              from keeper_secrets_manager_core.dto.payload import CreateOptions
+              cmd, cfg = sys.argv[1], sys.argv[2]
+              sm = SecretsManager(config=InMemoryKeyValueStorage(open(cfg).read()))
+              if cmd == "create":
+                  folder, title, path = sys.argv[3], sys.argv[4], sys.argv[5]
+                  uid = sm.create_secret_with_options(CreateOptions(folder, None), RecordCreate("login", title))
+                  rec = None
+                  for _ in range(10):
+                      found = sm.get_secrets([uid])
+                      if found:
+                          rec = found[0]
+                          break
+                      time.sleep(1)
+                  file_uid = sm.upload_file(rec, KeeperFileUpload.from_file(path, "r25-attach.txt", "r25-attach.txt"))
+                  # The storage URL of a file that was just uploaded can be missing for a few seconds.
+                  for _ in range(30):
+                      files = sm.get_secrets([uid])[0].files
+                      if files and files[0].f.get("url"):
+                          break
+                      time.sleep(2)
+                  print(json.dumps({"uid": uid, "file_uid": file_uid}))
+              elif cmd == "delete":
+                  rec = sm.get_secrets([sys.argv[3]])[0]
+                  assert rec.title.startswith("K1672-"), "refusing to delete " + rec.title
+                  sm.delete_secret([sys.argv[3]])
+                  print("deleted")
+
+        - name: Write the file content
+          copy:
+            dest: "{{ r33_tmp.path }}/payload.txt"
+            content: "R33-KSM-1672-attachment-{{ r33_run }}\n"
+            mode: "0600"
+
+        - name: Create the record with the attached file
+          command: >-
+            {{ ansible_playbook_python }} {{ r33_tmp.path }}/helper.py create {{ config_file }}
+            {{ shared_folder_uid }} K1672-r25-1-{{ r33_run }} {{ r33_tmp.path }}/payload.txt
+          register: r33_created
+          changed_when: true
+
+        - name: Remember the UIDs
+          set_fact:
+            r33_uid: "{{ (r33_created.stdout | from_json).uid }}"
+
+        - name: Read the file by the direct file field
+          keeper_get:
+            uid: "{{ r33_uid }}"
+            file: r25-attach.txt
+          register: r33_direct
+
+        - name: Read the file by the file notation
+          keeper_get:
+            notation: "keeper://{{ r33_uid }}/file/r25-attach.txt"
+          register: r33_notation
+
+        - name: Read the file by the lookup
+          set_fact:
+            r33_lookup: "{{ lookup(r33_lookup_name, notation='keeper://' ~ r33_uid ~ '/file/r25-attach.txt') }}"
+
+        - name: Assert that every route returned the uploaded bytes
+          assert:
+            that:
+              - (r33_direct.value | b64encode) == (("R33-KSM-1672-attachment-" ~ r33_run ~ "\n") | b64encode)
+              - r33_notation.value == r33_direct.value
+              - r33_lookup == r33_direct.value
+            success_msg: "PASS [R33.1]: file field, file notation and lookup all returned the uploaded bytes"
+
+      always:
+        - name: Delete the record by its exact UID
+          command: "{{ ansible_playbook_python }} {{ r33_tmp.path }}/helper.py delete {{ config_file }} {{ r33_uid }}"
+          when: r33_uid is defined
+          changed_when: true
+
+        - name: Remove the scratch directory
+          file:
+            path: "{{ r33_tmp.path }}"
+            state: absent

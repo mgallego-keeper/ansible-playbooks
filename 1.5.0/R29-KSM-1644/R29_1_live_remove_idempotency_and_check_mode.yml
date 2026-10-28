@@ -1,0 +1,129 @@
+---
+# R29.1: live keeper_remove keeps its normal behavior after the KSM-1644 fix: a readable record is removed,
+# check mode predicts without deleting, and a record that is really gone is a no-op (KSM-1644).
+#
+# The fix makes remove_record() read the vault with full_response=True so it can tell "unreadable" from
+# "absent". This guards the other side of that change: genuine absence must still return changed=false with
+# "The record was not found, or it is not shared to this KSM application. Nothing was deleted." and must not
+# fail. The unreadable case itself cannot be made live; R29.2 covers it against the real SDK.
+#
+# What this does: keeper_create makes a throwaway login record in shared_folder_uid. Then, in order:
+#   1. keeper_remove with check_mode returns changed=true and the record UID, and the record is still readable.
+#   2. keeper_remove deletes it (changed=true), keeper_get_record by uid then fails.
+#   3. keeper_remove of the same UID again returns changed=false with the not-found message.
+#   4. keeper_remove of a UID that never existed returns changed=false with the same message.
+# An always: section removes the record (retried, because QA throttles). Leaves the vault as it found it.
+- name: "R29.1: live keeper_remove: check mode, removal, and genuine absence"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    r29_not_found: "The record was not found, or it is not shared to this KSM application. Nothing was deleted."
+    r29_never_existed: "ZZZZZZZZZZZZZZZZZZZZZZ"
+
+  tasks:
+    - name: Fix the run id once
+      set_fact:
+        r29_title: "KSMV-R29_1-{{ now(fmt='%Y%m%d_%H%M%S') }}"
+
+    - name: Run the scenario and always clean up
+      block:
+        - name: Create the throwaway record
+          keeper_create:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            record_type: login
+            title: "{{ r29_title }}"
+            fields:
+              - type: login
+                value: "r29_user"
+              - type: password
+                value: "R29-not-a-real-secret"
+          register: r29_created
+          no_log: true
+          retries: 2
+          delay: 70
+          until: r29_created is not failed
+
+        - name: Check-mode remove predicts the delete
+          keeper_remove:
+            uid: "{{ r29_created.record_uid }}"
+          check_mode: true
+          register: r29_check
+
+        - name: Read the record after the check-mode remove
+          keeper_get_record:
+            uid: "{{ r29_created.record_uid }}"
+          register: r29_after_check
+          no_log: true
+
+        - name: Assert check mode predicted a change and deleted nothing
+          assert:
+            that:
+              - r29_check is changed
+              - r29_check.record_uid == r29_created.record_uid
+              - r29_check.record_title == r29_title
+              - r29_after_check is not failed
+            success_msg: "PASS [R29.1a]: check mode returned changed=true for {{ r29_check.record_uid }} and the record is still readable"
+            fail_msg: "FAIL [R29.1a]: check mode result {{ r29_check }}, record still readable={{ r29_after_check is not failed }}"
+
+        - name: Remove the record
+          keeper_remove:
+            uid: "{{ r29_created.record_uid }}"
+          register: r29_removed
+          retries: 2
+          delay: 70
+          until: r29_removed is not failed
+
+        - name: Read the record after the remove
+          keeper_get_record:
+            uid: "{{ r29_created.record_uid }}"
+          register: r29_after_remove
+          ignore_errors: true
+          no_log: true
+
+        - name: Assert the record was removed
+          assert:
+            that:
+              - r29_removed is changed
+              - r29_removed.record_uid == r29_created.record_uid
+              - r29_after_remove is failed
+            success_msg: "PASS [R29.1b]: keeper_remove returned changed=true and the record can no longer be read"
+            fail_msg: "FAIL [R29.1b]: remove result {{ r29_removed }}, record still readable={{ r29_after_remove is not failed }}"
+
+        - name: Remove the same UID again
+          keeper_remove:
+            uid: "{{ r29_created.record_uid }}"
+          register: r29_again
+
+        - name: Remove a UID that never existed
+          keeper_remove:
+            uid: "{{ r29_never_existed }}"
+          register: r29_never
+
+        - name: Assert genuine absence is an idempotent no-op with the original message
+          assert:
+            that:
+              - r29_again is not failed
+              - r29_again is not changed
+              - r29_again.msg == r29_not_found
+              - r29_never is not failed
+              - r29_never is not changed
+              - r29_never.msg == r29_not_found
+            success_msg: "PASS [R29.1c]: a removed UID and a never-existing UID both return changed=false, '{{ r29_not_found }}'"
+            fail_msg: "FAIL [R29.1c]: again={{ r29_again }} never={{ r29_never }}"
+
+      always:
+        - name: Remove the throwaway record if it is still there
+          keeper_remove:
+            uid: "{{ r29_created.record_uid }}"
+          register: r29_cleanup
+          retries: 6
+          delay: 20
+          until: r29_cleanup is not failed
+          when: r29_created is defined and r29_created.record_uid is defined
+          ignore_errors: true
+          no_log: true

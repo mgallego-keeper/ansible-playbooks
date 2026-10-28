@@ -1,0 +1,95 @@
+---
+# R11.3: Invalid-JSON-shape cache is rejected safely, falls back to vault (KSM-1103)
+#
+# QA setup: none. The playbook creates and removes its own fixture record in shared_folder_uid.
+#
+# Regression for KSM-1103. A cache blob that decrypts to valid JSON but the
+# wrong shape (not a list of record dicts) must not raise an unhandled
+# exception — decrypt() raises CacheUnusableError, and get_records() catches
+# it, warns, and falls back to a live vault fetch.
+
+- name: "R11.3: invalid-JSON-shape cache safely rejected (KSM-1103)"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    invalid_json_cache_path: "/tmp/r11_3_invalid_json_cache.bin"
+    make_blob_script: "{{ playbook_dir }}/make_legacy_cache_blob.py"
+
+  tasks:
+    - name: Create the fixture record (known login and url, so no seed record is needed)
+      keeper_create:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        record_type: login
+        title: "R11 Cache Fixture - {{ now(fmt='%Y%m%d_%H%M%S') }}"
+        fields:
+          - type: login
+            value: "r11_qa_user"
+          - type: url
+            value: "https://qa.example.com"
+      register: r11_record
+      no_log: true
+
+    - block:
+      - name: Generate cache secret
+        keeper_password:
+          length: 64
+        register: cache_secret_gen
+        no_log: true
+
+      - name: Store cache secret
+        set_fact:
+          keeper_record_cache_secret: "{{ cache_secret_gen.password }}"
+        no_log: true
+
+      - name: Craft an invalid-JSON-shape cache blob (valid Fernet, valid JSON, wrong shape)
+        # argv form, not an interpolated string — a plain string here gets shlex-split by the
+        # command module, and keeper_password's randomly-generated secret occasionally contains
+        # an odd number of quote-like characters, which breaks that split ("No closing
+        # quotation"). argv passes each argument through untouched, no splitting at all.
+        command:
+          argv:
+            - "{{ ansible_playbook_python }}"
+            - "{{ make_blob_script }}"
+            - "{{ keeper_record_cache_secret }}"
+            - "{{ invalid_json_cache_path }}"
+            - invalid-json
+        no_log: true
+        changed_when: false
+
+      - name: Read the crafted invalid-JSON-shape cache blob
+        set_fact:
+          invalid_json_cache_blob: "{{ lookup('file', invalid_json_cache_path) }}"
+        no_log: true
+
+      - name: Attempt read via invalid-shape cache (must fall back to vault, not crash)
+        keeper_get:
+          cache: "{{ invalid_json_cache_blob }}"
+          uid: "{{ r11_record.record_uid }}"
+          field: login
+        register: invalid_read
+        ignore_errors: true
+
+      - name: Assert invalid-shape cache was ignored and vault fallback succeeded
+        assert:
+          that:
+            - invalid_read.failed is not defined or invalid_read.failed == false
+            - invalid_read.value == "r11_qa_user"
+          success_msg: "PASS [R11.3]: Invalid-JSON-shape cache safely ignored — fell back to vault, got '{{ invalid_read.value | default('') }}'"
+          fail_msg: "FAIL [R11.3]: Invalid-shape cache handling broke the play — {{ invalid_read.msg | default('unknown error') }}"
+
+      - name: Remove crafted cache file
+        file:
+          path: "{{ invalid_json_cache_path }}"
+          state: absent
+        ignore_errors: true
+
+      always:
+        - name: Remove the fixture record
+          keeper_remove:
+            uid: "{{ r11_record.record_uid }}"
+          ignore_errors: yes

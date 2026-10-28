@@ -1,0 +1,110 @@
+---
+# R30.2: live keeper_create keeps false and zero in custom fields (KSM-1645).
+#
+# Before the fix, a custom field with value false or 0 was stored with an empty value array
+# although the task reported changed=True.
+#
+# What this does: keeper_create makes a throwaway login record in shared_folder_uid with custom
+# fields checkbox=false, text=0, date=0, a text field whose value is an explicit empty list
+# (must not crash and must stay empty) and a text field with an ordinary string (backward
+# compatibility). keeper_get_record and keeper_get read it back. The checks compare the JSON text
+# of each value, because the Python comparison [0] == [false] is true and would hide the bug.
+# keeper_remove deletes the record in an always: section (retried, because QA throttles),
+# and a final keeper_get_record by uid must fail, which proves the vault is back where it started.
+- name: "R30.2: live custom fields keep false and 0"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+
+  tasks:
+    - name: Fix the run id once (a vars entry that calls now() is evaluated again at each use)
+      set_fact:
+        r30_title: "KSMV-R30_2-{{ now(fmt='%Y%m%d_%H%M%S') }}"
+
+    - name: Run the scenario and always clean up
+      block:
+        - name: Create the throwaway record with false, zero and empty-list custom fields
+          keeper_create:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            record_type: login
+            title: "{{ r30_title }}"
+            fields:
+              - type: login
+                value: "r30_user"
+            custom_fields:
+              - {type: checkbox, label: Disabled, value: false}
+              - {type: text, label: Count, value: 0}
+              - {type: date, label: Epoch, value: 0}
+              - {type: text, label: EmptyList, value: []}
+              - {type: text, label: Regular, value: "hello"}
+          register: r30_created
+
+        - name: Assert the task created a record
+          assert:
+            that:
+              - r30_created is changed
+              - r30_created.record_uid is defined
+            success_msg: "PASS [R30.2 create]: changed=true and a record_uid was returned, the empty-list field did not crash"
+            fail_msg: "FAIL [R30.2 create]: {{ r30_created }}"
+
+        - name: Read the whole record back
+          keeper_get_record:
+            uid: "{{ r30_created.record_uid }}"
+          register: r30_rec
+
+        - name: Assert the stored value arrays
+          assert:
+            that:
+              - (r30_rec.record.Disabled | to_json) == '[false]'
+              - (r30_rec.record.Count | to_json) == '[0]'
+              - (r30_rec.record.Epoch | to_json) == '[0]'
+              - (r30_rec.record.EmptyList | to_json) == '[]'
+              - (r30_rec.record.Regular | to_json) == '["hello"]'
+              - (r30_rec.record.login | to_json) == '["r30_user"]'
+            success_msg: "PASS [R30.2 stored]: Disabled=[false] Count=[0] Epoch=[0] EmptyList=[] Regular=[hello] login=[r30_user]"
+            fail_msg: "FAIL [R30.2 stored]: Disabled={{ r30_rec.record.Disabled | to_json }} Count={{ r30_rec.record.Count | to_json }} Epoch={{ r30_rec.record.Epoch | to_json }} EmptyList={{ r30_rec.record.EmptyList | to_json }} Regular={{ r30_rec.record.Regular | to_json }}"
+
+        - name: Read the false and zero custom fields one at a time
+          keeper_get:
+            uid: "{{ r30_created.record_uid }}"
+            custom_field: "{{ item }}"
+          loop: [Disabled, Count, Epoch]
+          register: r30_single
+
+        - name: Assert keeper_get returns false and 0, not empty
+          assert:
+            that:
+              - (r30_single.results[0].value | to_json) == 'false'
+              - (r30_single.results[1].value | to_json) == '0'
+              - (r30_single.results[2].value | to_json) == '0'
+            success_msg: "PASS [R30.2 keeper_get]: Disabled=false Count=0 Epoch=0"
+            fail_msg: "FAIL [R30.2 keeper_get]: {{ r30_single.results | map(attribute='value') | list | to_json }}"
+
+      always:
+        - name: Remove the throwaway record
+          keeper_remove:
+            uid: "{{ r30_created.record_uid }}"
+          register: r30_removed
+          retries: 6
+          delay: 20
+          until: r30_removed is not failed
+          when: r30_created is defined and r30_created.record_uid is defined
+          ignore_errors: true
+
+    - name: Confirm the record is gone from the vault
+      keeper_get_record:
+        uid: "{{ r30_created.record_uid }}"
+      register: r30_after
+      ignore_errors: true
+      when: r30_created is defined and r30_created.record_uid is defined
+
+    - name: Assert the vault is back where it started
+      assert:
+        that: r30_after is failed
+        success_msg: "PASS [R30.2 cleanup]: keeper_get_record on the removed record fails, the vault is back to baseline"
+        fail_msg: "FAIL [R30.2 cleanup]: the removed record can still be read"

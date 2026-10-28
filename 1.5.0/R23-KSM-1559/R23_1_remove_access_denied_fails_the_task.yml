@@ -1,0 +1,59 @@
+---
+# R23.1: A delete the server refuses (real responseCode "access_denied") fails the task with the
+# server's code/message, instead of being reported as a success (KSM-1559 core fix).
+#
+# OLD behavior for this exact scenario, per the ticket: {'changed': False, 'failed': False} --
+# a refused delete was silently reported as a success.
+#
+# Needs a record the application can read but cannot delete. Set `non_editable_record_uid` in
+# test_vars.json to the UID of a record inside the read-only folder (`non_editable_folder_uid`).
+# If it is not set, this playbook prints a SKIP line and ends cleanly: the runner reports it as
+# skipped, not passed. The record is only read, never changed.
+- name: "R23.1: keeper_remove on a record the server refuses to delete fails the task"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    read_only_record_uid: "{{ non_editable_record_uid | default('') }}"
+
+  tasks:
+    - name: Skip when no read-only record is configured
+      debug:
+        msg: "SKIP [R23.1]: non_editable_record_uid is not set in test_vars.json (UID of a record the application can read but cannot delete)"
+      when: read_only_record_uid | length == 0
+
+    - name: End the play when there is nothing to test
+      meta: end_play
+      when: read_only_record_uid | length == 0
+
+    - name: Attempt to delete the read-only record (expect a real server refusal)
+      keeper_remove:
+        uid: "{{ read_only_record_uid }}"
+      register: refused_delete
+      ignore_errors: yes
+
+    - name: Verify the refused delete fails the task with the server's responseCode/message
+      assert:
+        that:
+          - refused_delete is failed
+          - refused_delete is not changed
+          - "'access_denied' in refused_delete.msg"
+        success_msg: "PASS [R23.1]: refused delete (live access_denied) failed the task -- msg: {{ refused_delete.msg }}"
+        fail_msg: "FAIL [R23.1]: refused delete did not fail the task correctly -- got {{ refused_delete }}"
+
+    - name: Verify the read-only record was NOT actually deleted
+      keeper_get_record:
+        uid: "{{ read_only_record_uid }}"
+      register: still_present
+      no_log: true
+
+    - name: Confirm the read-only record is still retrievable after the refused delete
+      assert:
+        that:
+          - still_present is not failed
+        success_msg: "PASS [R23.1]: read-only record confirmed still present after the refused delete"
+        fail_msg: "FAIL [R23.1]: read-only record is gone -- a refused delete should never remove it -- got {{ still_present }}"

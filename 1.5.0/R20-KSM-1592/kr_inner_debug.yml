@@ -1,0 +1,39 @@
+---
+# Inner playbook for R20.2. Not a test by itself. A secret is fetched with keeper_get, and
+# LATER tasks print it: debug var of the registered result, debug msg of the value, and
+# debug var of a fact copied from the value.
+# Expects -e: keeper_config_file, kr_pw_uids (list), kr_num_uid.
+- name: "KSM-1592 inner: later debug tasks print a registered keeper_get result"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
+
+  tasks:
+    - name: Fetch every password and the numeric field
+      keeper_get:
+        uid: "{{ item }}"
+        field: "{{ 'birthDate' if item == kr_num_uid else 'password' }}"
+      loop: "{{ kr_pw_uids + [kr_num_uid] }}"
+      register: kr_got
+
+    - name: debug var of the registered result
+      debug:
+        var: kr_got
+
+    - name: debug msg of each fetched value (4+ characters)
+      debug:
+        msg: "prefix text {{ item.value }} suffix text"
+      loop: "{{ kr_got.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: debug var of a fact copied from a fetched value
+      set_fact:
+        kr_copy_of_special: "{{ kr_got.results[1].value }}"
+      no_log: true
+
+    - name: debug var of the copied fact
+      debug:
+        var: kr_copy_of_special

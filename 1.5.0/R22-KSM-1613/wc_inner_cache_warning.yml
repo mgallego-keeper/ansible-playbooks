@@ -1,0 +1,43 @@
+---
+# Inner playbook for R22_2. Not a test by itself (the runner skips it: the file name does not start
+# with A or R). R22_2 runs it with ansible-playbook and reads the printed output, because a task
+# cannot see its own display.warning() text.
+#
+# Variables: config_file, set_uid, remove_uid, use_cache (true/false).
+- name: "Inner: keeper_set and keeper_remove with or without cache="
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+
+  tasks:
+    - name: Set a cache secret
+      set_fact:
+        keeper_record_cache_secret: "wc-inner-cache-secret-for-r22-2"
+      no_log: true
+
+    - name: Build a cache of both records
+      keeper_cache_records:
+        uids:
+          - "{{ set_uid }}"
+          - "{{ remove_uid }}"
+      register: built_cache
+      no_log: true
+
+    - name: keeper_set, with cache= only when asked
+      keeper_set:
+        uid: "{{ set_uid }}"
+        field: login
+        value: "r22-2-updated"
+        cache: "{{ built_cache.cache if (use_cache | bool) else omit }}"
+      no_log: true
+
+    - name: keeper_remove, with cache= only when asked
+      keeper_remove:
+        uid: "{{ remove_uid }}"
+        cache: "{{ built_cache.cache if (use_cache | bool) else omit }}"
+      no_log: true
