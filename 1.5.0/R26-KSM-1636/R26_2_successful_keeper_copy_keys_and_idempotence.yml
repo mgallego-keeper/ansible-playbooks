@@ -1,0 +1,166 @@
+---
+# R26.2: a SUCCESSFUL keeper_copy returns no checksum, md5sum or size key, still writes the right
+# file with the right mode, and a second identical run reports changed false (KSM-1636).
+#
+# Before the fix a successful keeper_copy result carried checksum (SHA-1 of the secret), md5sum and
+# size (the secret length). The fix filters the result down to a fixed list of keys. The risk of
+# that filter is that it also drops a key the Ansible engine or the idempotence check needs, so
+# this checks the file and the second run as well as the missing keys.
+#
+# What this does: creates two throwaway records (a plain password and `pa"ss\word`), copies each
+# password to a temp directory with mode 0640 twice, and checks:
+#   - run 1: changed true, and no checksum, md5sum or size key,
+#   - the file content equals the secret exactly, and its mode is 0640,
+#   - run 2: changed false and the same keys are absent,
+#   - the result text holds no SHA-1, MD5 or SHA-256 of the secret.
+# It removes the records and the temp directory whatever happens.
+- name: "R26.2: a successful keeper_copy has no checksum, md5sum or size and stays idempotent"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+
+  tasks:
+    - name: Fix a tag and the two secrets for this run
+      set_fact:
+        run_tag: "{{ now(fmt='%Y%m%d_%H%M%S') }}"
+        r26_secrets:
+          - "r26-2-plain-{{ now(fmt='%Y%m%d%H%M%S') }}"
+          - 'pa"ss\word'
+
+    - name: Run the checks, then clean up
+      block:
+        - name: Create the throwaway records
+          keeper_create:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            record_type: login
+            title: "R26.2 {{ idx }} - {{ run_tag }}"
+            fields:
+              - type: login
+                value: "r26-2-user"
+              - type: password
+                value: "{{ item }}"
+          loop: "{{ r26_secrets }}"
+          loop_control:
+            index_var: idx
+            label: "secret {{ idx }}"
+          register: made
+          no_log: true
+
+        - name: Keep only the record uids (a uid is not a secret, the loop item of the create task is)
+          set_fact:
+            r26_uids: "{{ made.results | map(attribute='record_uid') | list }}"
+
+        - name: Make a scratch directory
+          tempfile:
+            state: directory
+            suffix: ksmv_r26_2
+          register: scratch
+
+        - name: keeper_copy run 1
+          keeper_copy:
+            notation: "{{ item }}/field/password"
+            dest: "{{ scratch.path }}/secret_{{ idx }}.txt"
+            mode: "0640"
+          loop: "{{ r26_uids }}"
+          loop_control:
+            index_var: idx
+            label: "{{ item }}"
+          register: run1
+
+        - name: keeper_copy run 2 (identical)
+          keeper_copy:
+            notation: "{{ item }}/field/password"
+            dest: "{{ scratch.path }}/secret_{{ idx }}.txt"
+            mode: "0640"
+          loop: "{{ r26_uids }}"
+          loop_control:
+            index_var: idx
+            label: "{{ item }}"
+          register: run2
+
+        - name: Assert run 1 changed the file and run 2 did not (idempotence survives the key removal)
+          assert:
+            that:
+              - run1.results | map(attribute='changed') | list == [true, true]
+              - run2.results | map(attribute='changed') | list == [false, false]
+              - run1.results | map(attribute='failed') | list == [false, false]
+              - run2.results | map(attribute='failed') | list == [false, false]
+            success_msg: "PASS [R26.2]: run 1 changed both files, run 2 changed neither"
+            fail_msg: "FAIL [R26.2]: changed flags are run1={{ run1.results | map(attribute='changed') | list }} run2={{ run2.results | map(attribute='changed') | list }}"
+
+        - name: Assert no checksum, md5sum or size key in either run
+          assert:
+            that:
+              - "'checksum' not in item"
+              - "'md5sum' not in item"
+              - "'size' not in item"
+              - "'checksum' not in ((item.invocation | default({})).module_args | default({}))"
+            success_msg: "PASS [R26.2]: result keys are {{ item.keys() | sort | list }}"
+            fail_msg: "FAIL [R26.2]: a successful keeper_copy result still has a checksum, md5sum or size key: {{ item.keys() | sort | list }}"
+          loop: "{{ run1.results + run2.results }}"
+          loop_control:
+            label: "{{ item.item }}"
+
+        - name: Read back each written file
+          slurp:
+            src: "{{ scratch.path }}/secret_{{ idx }}.txt"
+          loop: "{{ r26_secrets }}"
+          loop_control:
+            index_var: idx
+            label: "file {{ idx }}"
+          register: written
+          no_log: true
+
+        - name: Stat each written file
+          stat:
+            path: "{{ scratch.path }}/secret_{{ idx }}.txt"
+          loop: "{{ r26_secrets }}"
+          loop_control:
+            index_var: idx
+            label: "file {{ idx }}"
+          register: stated
+
+        - name: Assert the file content equals the secret and the mode was applied
+          assert:
+            that:
+              - (written.results[idx].content | b64decode) == item
+              - stated.results[idx].stat.mode == '0640'
+            success_msg: "PASS [R26.2]: file {{ idx }} holds the secret exactly and has mode 0640"
+            fail_msg: "FAIL [R26.2]: file {{ idx }} content or mode is wrong (mode={{ stated.results[idx].stat.mode }})"
+          loop: "{{ r26_secrets }}"
+          loop_control:
+            index_var: idx
+            label: "file {{ idx }}"
+
+        - name: Assert the result text holds no digest of the secret
+          assert:
+            that:
+              - (item.0 | hash('sha1')) not in ((item.1 | to_json) ~ (item.2 | to_json))
+              - (item.0 | hash('md5')) not in ((item.1 | to_json) ~ (item.2 | to_json))
+              - (item.0 | hash('sha256')) not in ((item.1 | to_json) ~ (item.2 | to_json))
+            success_msg: "PASS [R26.2]: no SHA-1, MD5 or SHA-256 of the secret in either result"
+            fail_msg: "FAIL [R26.2]: a successful keeper_copy result holds a digest of the secret"
+          loop: "{{ r26_secrets | zip(run1.results, run2.results) | list }}"
+          loop_control:
+            label: "secret"
+
+      always:
+        - name: Remove whatever throwaway records exist
+          keeper_remove:
+            uid: "{{ item }}"
+          loop: "{{ made.results | default([]) | selectattr('record_uid', 'defined') | map(attribute='record_uid') | list }}"
+          loop_control:
+            label: "{{ item }}"
+          ignore_errors: true
+          no_log: true
+
+        - name: Remove the scratch directory
+          file:
+            path: "{{ scratch.path }}"
+            state: absent
+          when: scratch is defined and scratch.path is defined

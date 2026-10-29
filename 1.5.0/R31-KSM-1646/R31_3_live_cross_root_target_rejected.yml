@@ -1,0 +1,168 @@
+---
+# R31.3: live, keeper_create_folder rejects a target from the wrong shared root (KSM-1646).
+#
+# Before the fix, the idempotency lookup ran before the target was checked. When subfolder_uid
+# belonged to root 1 but shared_folder_uid named root 2, and the folder name already existed in
+# that subfolder, the task returned the root 1 folder with changed=false. The same happened when
+# shared_folder_uid was a subfolder UID instead of a shared folder UID.
+#
+# What this does: keeper_create_folder makes "K1646-P-<run id>" in shared_folder_uid (root 1) and
+# "K1646-C-<run id>" inside it. It then asks for that existing child name with
+#   (a) shared_folder_uid = second_shared_folder_uid, subfolder_uid = the root 1 parent,
+#   (b) the same as (a) in check mode,
+#   (c) shared_folder_uid = the root 1 parent itself (a subfolder, not a shared folder),
+#   (d) a NEW name with the target of (a),
+# and asserts each task fails with the exact message of the fixed code, and that no
+# folder was created in root 2. A valid request (root 1, the parent) must still return the child
+# with changed=false. The playbook skips when second_shared_folder_uid is not set.
+# keeper_delete_folder removes the parent (and the child with it) by exact UID in an always:
+# section (retried, because QA throttles); a final lookup must fail.
+- name: "R31.3: cross-root create-folder target is rejected"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+
+  tasks:
+    - name: Skip when no second shared root is given
+      meta: end_play
+      when: second_shared_folder_uid | default('') | length == 0
+
+    - name: Fix the run id and names once
+      set_fact:
+        r31_parent: "K1646-P-{{ now(fmt='%Y%m%d%H%M%S') }}"
+        r31_child: "K1646-C-{{ now(fmt='%Y%m%d%H%M%S') }}"
+        r31_new: "K1646-N-{{ now(fmt='%Y%m%d%H%M%S') }}"
+
+    - name: Run the scenario and always clean up
+      block:
+        - name: Create the parent folder in root 1
+          keeper_create_folder:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            folder_name: "{{ r31_parent }}"
+          register: r31_p
+
+        - name: Pause for the QA throttle
+          pause: {seconds: 5}
+
+        - name: Create the child inside the parent
+          keeper_create_folder:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            subfolder_uid: "{{ r31_p.folder_uid }}"
+            folder_name: "{{ r31_child }}"
+          register: r31_c
+
+        - name: Assert both folders were created
+          assert:
+            that:
+              - r31_p is changed
+              - r31_c is changed
+              - r31_p.folder_uid != r31_c.folder_uid
+            success_msg: "PASS [R31.3 setup]: parent={{ r31_p.folder_uid }} child={{ r31_c.folder_uid }}"
+            fail_msg: "FAIL [R31.3 setup]: parent={{ r31_p }} child={{ r31_c }}"
+
+        - name: (a) Existing child name, parent from root 1, shared root 2
+          keeper_create_folder:
+            shared_folder_uid: "{{ second_shared_folder_uid }}"
+            subfolder_uid: "{{ r31_p.folder_uid }}"
+            folder_name: "{{ r31_child }}"
+          register: r31_a
+          ignore_errors: true
+
+        - name: (b) The same in check mode
+          keeper_create_folder:
+            shared_folder_uid: "{{ second_shared_folder_uid }}"
+            subfolder_uid: "{{ r31_p.folder_uid }}"
+            folder_name: "{{ r31_child }}"
+          check_mode: true
+          register: r31_b
+          ignore_errors: true
+
+        - name: (c) A subfolder UID given as the shared folder
+          keeper_create_folder:
+            shared_folder_uid: "{{ r31_p.folder_uid }}"
+            folder_name: "{{ r31_child }}"
+          register: r31_cc
+          ignore_errors: true
+
+        - name: (d) A new name with the wrong-root target
+          keeper_create_folder:
+            shared_folder_uid: "{{ second_shared_folder_uid }}"
+            subfolder_uid: "{{ r31_p.folder_uid }}"
+            folder_name: "{{ r31_new }}"
+          register: r31_d
+          ignore_errors: true
+
+        - name: Look for the new name in both roots after the rejected create
+          keeper_get_folder:
+            shared_folder_uid: "{{ item }}"
+            folder_name: "{{ r31_new }}"
+          loop: ["{{ shared_folder_uid }}", "{{ second_shared_folder_uid }}"]
+          register: r31_after_new
+          ignore_errors: true
+
+        - name: Assert the wrong-root target is rejected
+          assert:
+            that:
+              - r31_a is failed
+              - "'is not inside the shared folder' in r31_a.msg"
+              - r31_b is failed
+              - "'is not inside the shared folder' in r31_b.msg"
+              - r31_d is failed
+              - "'is not inside the shared folder' in r31_d.msg"
+            success_msg: "PASS [R31.3 wrong root]: (a) {{ r31_a.msg | default('') }} || (b) {{ r31_b.msg | default('') }} || (d) {{ r31_d.msg | default('') }}"
+            fail_msg: "FAIL [R31.3 wrong root]: (a) failed={{ r31_a is failed }} changed={{ r31_a.changed | default('n/a') }} uid={{ r31_a.folder_uid | default('none') }} (b) failed={{ r31_b is failed }} uid={{ r31_b.folder_uid | default('none') }} (d) failed={{ r31_d is failed }} uid={{ r31_d.folder_uid | default('none') }}"
+
+        - name: Assert a subfolder given as the shared folder is rejected and nothing was created
+          assert:
+            that:
+              - r31_cc is failed
+              - "'is a subfolder, not a shared folder' in r31_cc.msg"
+              - r31_after_new.results[0] is failed
+              - r31_after_new.results[1] is failed
+            success_msg: "PASS [R31.3 subfolder as root]: (c) {{ r31_cc.msg | default('') }} || no {{ r31_new }} in either root"
+            fail_msg: "FAIL [R31.3 subfolder as root]: (c) failed={{ r31_cc is failed }} uid={{ r31_cc.folder_uid | default('none') }} new in root1={{ r31_after_new.results[0] is not failed }} root2={{ r31_after_new.results[1] is not failed }}"
+
+        - name: A valid request for the existing child still works
+          keeper_create_folder:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            subfolder_uid: "{{ r31_p.folder_uid }}"
+            folder_name: "{{ r31_child }}"
+          register: r31_ok
+
+        - name: Assert the valid request is idempotent
+          assert:
+            that:
+              - r31_ok is not changed
+              - r31_ok.folder_uid == r31_c.folder_uid
+            success_msg: "PASS [R31.3 valid]: the existing child {{ r31_ok.folder_uid }} is returned with changed=false"
+            fail_msg: "FAIL [R31.3 valid]: {{ r31_ok }}"
+
+      always:
+        - name: Remove only the parent this run created (the child goes with it), by exact UID
+          keeper_delete_folder:
+            folder_uid: "{{ r31_p.folder_uid }}"
+            force_deletion: true
+          register: r31_del
+          retries: 6
+          delay: 20
+          until: r31_del is not failed
+          when: r31_p is defined and r31_p.folder_uid is defined
+          ignore_errors: true
+
+    - name: Confirm the parent is gone
+      keeper_get_folder:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        folder_name: "{{ r31_parent }}"
+      register: r31_after
+      ignore_errors: true
+
+    - name: Assert the vault is back where it started
+      assert:
+        that: r31_after is failed
+        success_msg: "PASS [R31.3 cleanup]: {{ r31_parent }} is gone from root 1"
+        fail_msg: "FAIL [R31.3 cleanup]: the test folder is still present"

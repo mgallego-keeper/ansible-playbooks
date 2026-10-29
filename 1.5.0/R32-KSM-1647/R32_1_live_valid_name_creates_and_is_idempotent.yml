@@ -1,0 +1,160 @@
+---
+# R32.1: live keeper_create_folder with a valid string name creates once and is idempotent (KSM-1647).
+#
+# KSM-1647: a non-string or padded folder_name created a malformed folder and then broke idempotency.
+# This is the control case: a valid string name must still create, and a repeat must find the same folder.
+#
+# Run it with: -e config_file=<KSM config JSON> -e shared_folder_uid=<writable classic shared folder UID>
+#
+# Raw pip / local surface note: this playbook uses collections: [keepersecurity.keeper_secrets_manager] and
+# short plugin names. On a raw pip install (plugins loaded from action_plugins= in ansible.cfg) set
+# ANSIBLE_COLLECTIONS_PATH to an EMPTY directory, so that a stale collection under ~/.ansible/collections
+# cannot shadow the code under test. Prove which code ran with ANSIBLE_DEBUG ("Loading ActionModule" lines).
+#
+# What this does: makes a parent folder K1647-p-<run id> in shared_folder_uid, then in that parent
+#   1. check mode create of K1647-ok-<run id>: changed=true, no folder_uid, parent still has 0 children
+#   2. real create: changed=true, a folder_uid is returned
+#   3. repeat create: changed=false and the same folder_uid
+#   4. repeat create in check mode: changed=false and the same folder_uid
+#   5. read back: keeper_get_folder finds the folder by name with the same UID, parent has exactly 1 child
+# Cleanup (always): keeper_delete_folder with force_deletion removes the parent by its exact UID, then
+# keeper_get_folder by name must fail.
+- name: "R32.1: live valid folder name creates once and is idempotent"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+
+  tasks:
+    - name: Fix the run id once (a vars entry that calls now() is evaluated again at each use)
+      set_fact:
+        r32_run: "{{ now(fmt='%Y%m%d%H%M%S') }}"
+
+    - name: Set the names from the run id
+      set_fact:
+        r32_parent_name: "K1647-p-{{ r32_run }}"
+        r32_ok_name: "K1647-ok-{{ r32_run }}"
+
+    - name: Run the scenario and always clean up
+      block:
+        - name: Create the parent folder
+          keeper_create_folder:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            folder_name: "{{ r32_parent_name }}"
+          register: r32_parent
+          retries: 3
+          delay: 70
+          until: r32_parent is not failed
+
+        - name: Check mode create predicts a change and creates nothing
+          keeper_create_folder:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            subfolder_uid: "{{ r32_parent.folder_uid }}"
+            folder_name: "{{ r32_ok_name }}"
+          check_mode: true
+          register: r32_check
+
+        - name: Read the parent's children after the check mode run
+          keeper_get_folder:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            subfolder_uid: "{{ r32_parent.folder_uid }}"
+            include_subfolders: true
+          register: r32_after_check
+
+        - name: Assert check mode predicted the change and created nothing
+          assert:
+            that:
+              - r32_check is changed
+              - r32_check.folder_uid is none
+              - r32_after_check.subfolders | length == 0
+            success_msg: "PASS [R32.1 check mode]: changed=true, folder_uid=null, parent has 0 children"
+            fail_msg: "FAIL [R32.1 check mode]: {{ r32_check }} children={{ r32_after_check.subfolders }}"
+
+        - name: Create the valid folder
+          keeper_create_folder:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            subfolder_uid: "{{ r32_parent.folder_uid }}"
+            folder_name: "{{ r32_ok_name }}"
+          register: r32_first
+          retries: 3
+          delay: 70
+          until: r32_first is not failed
+
+        - name: Repeat the create
+          keeper_create_folder:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            subfolder_uid: "{{ r32_parent.folder_uid }}"
+            folder_name: "{{ r32_ok_name }}"
+          register: r32_second
+
+        - name: Repeat the create in check mode
+          keeper_create_folder:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            subfolder_uid: "{{ r32_parent.folder_uid }}"
+            folder_name: "{{ r32_ok_name }}"
+          check_mode: true
+          register: r32_second_check
+
+        - name: Assert the create and both repeats
+          assert:
+            that:
+              - r32_first is changed
+              - r32_first.folder_uid is string and r32_first.folder_uid | length > 0
+              - r32_second is not changed
+              - r32_second.folder_uid == r32_first.folder_uid
+              - r32_second_check is not changed
+              - r32_second_check.folder_uid == r32_first.folder_uid
+            success_msg: "PASS [R32.1 idempotent]: created {{ r32_first.folder_uid }}, repeat and check-mode repeat changed=false with the same UID"
+            fail_msg: "FAIL [R32.1 idempotent]: first={{ r32_first }} second={{ r32_second }} check={{ r32_second_check }}"
+
+        - name: Read the folder back by name
+          keeper_get_folder:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            subfolder_uid: "{{ r32_parent.folder_uid }}"
+            folder_name: "{{ r32_ok_name }}"
+          register: r32_read
+
+        - name: Read the parent's children
+          keeper_get_folder:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            subfolder_uid: "{{ r32_parent.folder_uid }}"
+            include_subfolders: true
+          register: r32_children
+
+        - name: Assert the read back
+          assert:
+            that:
+              - r32_read.folder_uid == r32_first.folder_uid
+              - r32_read.folder_name == r32_ok_name
+              - r32_children.subfolders | length == 1
+            success_msg: "PASS [R32.1 read back]: the folder reads back by name with the same UID and the parent has exactly 1 child"
+            fail_msg: "FAIL [R32.1 read back]: {{ r32_read }} children={{ r32_children.subfolders }}"
+
+      always:
+        - name: Delete the parent folder (and the child) by its exact UID
+          keeper_delete_folder:
+            folder_uid: "{{ r32_parent.folder_uid }}"
+            force_deletion: true
+          register: r32_deleted
+          retries: 3
+          delay: 70
+          until: r32_deleted is not failed
+          when: r32_parent is defined and r32_parent.folder_uid is defined
+          ignore_errors: true
+
+    - name: Confirm the parent folder is gone
+      keeper_get_folder:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        folder_name: "{{ r32_parent_name }}"
+      register: r32_gone
+      ignore_errors: true
+
+    - name: Assert the vault is back where it started
+      assert:
+        that: r32_gone is failed
+        success_msg: "PASS [R32.1 cleanup]: the parent folder K1647-p-{{ r32_run }} is gone"
+        fail_msg: "FAIL [R32.1 cleanup]: the parent folder is still there: {{ r32_gone }}"

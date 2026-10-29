@@ -1,0 +1,99 @@
+---
+# R11.2: Legacy/pickle-marker-format cache is rejected safely, not deserialized (KSM-1103)
+#
+# QA setup: none. The playbook creates and removes its own fixture record in shared_folder_uid.
+#
+# Regression for KSM-1103 (CWE-502 / APPSEC-9 / internal ref VM-1452).
+# A cache blob whose decrypted plaintext starts with the pickle protocol
+# marker byte (0x80) must never reach pickle.loads. decrypt() must raise
+# CacheUnusableError, and get_records() must catch it, warn, and fall back
+# to a live vault fetch instead of crashing the play.
+#
+# This playbook crafts such a blob with the SAME key derivation
+# KeeperAnsible.get_encryption_key() uses (see make_legacy_cache_blob.py) —
+# it is not a working pickle exploit; the live __reduce__ exploit proof is
+# tests/keeper_cache_encrypt_test.py::test_decrypt_rejects_pickle_payload
+# (Layer 1/2 of the KSM-1103 validation ladder).
+
+- name: "R11.2: legacy pickle-marker cache safely rejected (KSM-1103)"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    legacy_cache_path: "/tmp/r11_2_legacy_cache.bin"
+    make_blob_script: "{{ playbook_dir }}/make_legacy_cache_blob.py"
+
+  tasks:
+    - name: Create the fixture record (known login and url, so no seed record is needed)
+      keeper_create:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        record_type: login
+        title: "R11 Cache Fixture - {{ now(fmt='%Y%m%d_%H%M%S') }}"
+        fields:
+          - type: login
+            value: "r11_qa_user"
+          - type: url
+            value: "https://qa.example.com"
+      register: r11_record
+      no_log: true
+
+    - block:
+      - name: Generate cache secret
+        keeper_password:
+          length: 64
+        register: cache_secret_gen
+        no_log: true
+
+      - name: Store cache secret
+        set_fact:
+          keeper_record_cache_secret: "{{ cache_secret_gen.password }}"
+        no_log: true
+
+      - name: Craft a legacy/pickle-marker-format cache blob (0x80 marker, not a working exploit)
+        # argv form, not an interpolated string — see R11_3's identical fix for why.
+        command:
+          argv:
+            - "{{ ansible_playbook_python }}"
+            - "{{ make_blob_script }}"
+            - "{{ keeper_record_cache_secret }}"
+            - "{{ legacy_cache_path }}"
+            - legacy-pickle
+        no_log: true
+        changed_when: false
+
+      - name: Read the crafted legacy cache blob bytes
+        set_fact:
+          legacy_cache_blob: "{{ lookup('file', legacy_cache_path) }}"
+        no_log: true
+
+      - name: Attempt read via legacy cache (must fall back to vault, not crash)
+        keeper_get:
+          cache: "{{ legacy_cache_blob }}"
+          uid: "{{ r11_record.record_uid }}"
+          field: login
+        register: legacy_read
+        ignore_errors: true
+
+      - name: Assert legacy cache was ignored and vault fallback succeeded
+        assert:
+          that:
+            - legacy_read.failed is not defined or legacy_read.failed == false
+            - legacy_read.value == "r11_qa_user"
+          success_msg: "PASS [R11.2]: Legacy/pickle-marker cache safely ignored — fell back to vault, got '{{ legacy_read.value | default('') }}'"
+          fail_msg: "FAIL [R11.2]: Legacy cache handling broke the play — {{ legacy_read.msg | default('unknown error') }}"
+
+      - name: Remove crafted cache file
+        file:
+          path: "{{ legacy_cache_path }}"
+          state: absent
+        ignore_errors: true
+
+      always:
+        - name: Remove the fixture record
+          keeper_remove:
+            uid: "{{ r11_record.record_uid }}"
+          ignore_errors: yes

@@ -1,0 +1,273 @@
+---
+# R33.2: a forced transport failure on the attachment request hides the signed URL (KSM-1672).
+#
+# Before the fix, an ordinary failed attachment request (refused connection, bad proxy, TLS or timeout error)
+# raised the requests error as it was. Its text holds the whole signed download URL: the storage host, the file
+# path, and the X-Amz query with the signature and the session security token. Ansible printed that text in the
+# task result and in the -vvv traceback. After the fix the plugin raises a fixed ConnectionError that names only
+# the operation and a safe class, for the direct file field, the file notation and the lookup.
+#
+# Run it with: -e config_file=<KSM config JSON> -e shared_folder_uid=<writable classic shared folder UID>
+# The Python that runs ansible-playbook needs the keeper-secrets-manager-core package.
+#
+# Raw pip / local surface note: this playbook uses collections: [keepersecurity.keeper_secrets_manager] and
+# short plugin names. On a raw pip install (plugins loaded from action_plugins= and lookup_plugins= in
+# ansible.cfg, found by ansible-playbook from the current directory) set ANSIBLE_COLLECTIONS_PATH to an EMPTY
+# directory, so that a stale collection under ~/.ansible/collections cannot shadow the code under test. Prove
+# which code ran with ANSIBLE_DEBUG ("Loading ActionModule" lines).
+#
+# How the failure is forced: the plugins read the proxy from the process environment, and a task-level
+# environment: does not reach an action plugin. So the playbook starts a loopback CONNECT proxy that tunnels
+# only the host of the Keeper API (taken from the config file) and answers 502 for every other host, which
+# includes the attachment storage host. It then runs a nested ansible-playbook with https_proxy pointing at that
+# proxy. The record lookup works, the attachment request fails. The proxy log must show a refused host, which
+# proves that the attachment request was really made and refused.
+#
+# What this does: creates K1672-r25-2-<run id> with one attached file, runs the nested play with -vvv, and
+# asserts: all three routes failed with "The file download failed (<class>).", and the full output (messages
+# and tracebacks) holds no X-Amz text, no Signature or Credential text, no "Max retries exceeded with url", no
+# file UID and no URL of the storage host.
+# The lookup name differs by surface, see r33_lookup_name below.
+# Cleanup (always): stops the proxy by its exact PID, deletes the record by its exact UID after checking that
+# the title starts with K1672-, and removes the scratch directory.
+- name: "R33.2: forced attachment transport failure hides the signed URL"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    # The lookup name: 'keeper' on a raw pip install, keepersecurity.keeper_secrets_manager.keeper on a Galaxy
+    # collection or the Tower image (pass -e r33_lookup_name=... there).
+    r33_lookup_name: "{{ 'keeper' if (surface | default('pip')) == 'pip' else 'keepersecurity.keeper_secrets_manager.keeper' }}"
+
+  tasks:
+    - name: Fix the run id once
+      set_fact:
+        r33_run: "{{ now(fmt='%Y%m%d%H%M%S') }}"
+
+    - name: Make a scratch directory
+      tempfile:
+        state: directory
+        prefix: r33_2_
+      register: r33_tmp
+
+    - name: Read the Keeper API host from the config file
+      set_fact:
+        r33_api_host: "{{ (lookup('file', config_file) | from_json).hostname }}"
+
+    - name: Run the scenario and always clean up
+      block:
+        - name: Write the helper that creates and deletes the record through the SDK
+          copy:
+            dest: "{{ r33_tmp.path }}/helper.py"
+            mode: "0600"
+            content: |
+              import json, sys, time
+              from keeper_secrets_manager_core import SecretsManager
+              from keeper_secrets_manager_core.storage import InMemoryKeyValueStorage
+              from keeper_secrets_manager_core.dto.dtos import RecordCreate, KeeperFileUpload
+              from keeper_secrets_manager_core.dto.payload import CreateOptions
+              cmd, cfg = sys.argv[1], sys.argv[2]
+              sm = SecretsManager(config=InMemoryKeyValueStorage(open(cfg).read()))
+              if cmd == "create":
+                  folder, title, path = sys.argv[3], sys.argv[4], sys.argv[5]
+                  uid = sm.create_secret_with_options(CreateOptions(folder, None), RecordCreate("login", title))
+                  rec = None
+                  for _ in range(10):
+                      found = sm.get_secrets([uid])
+                      if found:
+                          rec = found[0]
+                          break
+                      time.sleep(1)
+                  file_uid = sm.upload_file(rec, KeeperFileUpload.from_file(path, "r25-attach.txt", "r25-attach.txt"))
+                  # The storage URL of a file that was just uploaded can be missing for a few seconds.
+                  for _ in range(30):
+                      files = sm.get_secrets([uid])[0].files
+                      if files and files[0].f.get("url"):
+                          break
+                      time.sleep(2)
+                  print(json.dumps({"uid": uid, "file_uid": file_uid}))
+              elif cmd == "delete":
+                  rec = sm.get_secrets([sys.argv[3]])[0]
+                  assert rec.title.startswith("K1672-"), "refusing to delete " + rec.title
+                  sm.delete_secret([sys.argv[3]])
+                  print("deleted")
+
+        - name: Write the loopback proxy
+          copy:
+            dest: "{{ r33_tmp.path }}/proxy.py"
+            mode: "0600"
+            content: |
+              import asyncio, os, sys
+              API, OUT, LIFE = sys.argv[1], sys.argv[2], int(sys.argv[3])
+              LOG = open(OUT + "/proxy.log", "a", buffering=1)
+              async def pipe(r, w):
+                  try:
+                      while True:
+                          data = await r.read(65536)
+                          if not data:
+                              break
+                          w.write(data)
+                          await w.drain()
+                  except Exception:
+                      pass
+                  finally:
+                      w.close()
+              async def handle(cr, cw):
+                  line = await cr.readline()
+                  while (await cr.readline()) not in (b"\r\n", b""):
+                      pass
+                  host, port = line.decode().split()[1].rsplit(":", 1)
+                  if host != API:
+                      LOG.write("REFUSE " + host + "\n")
+                      cw.write(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+                      await cw.drain()
+                      cw.close()
+                      return
+                  LOG.write("TUNNEL " + host + "\n")
+                  ur, uw = await asyncio.open_connection(host, int(port))
+                  cw.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                  await cw.drain()
+                  await asyncio.gather(pipe(cr, uw), pipe(ur, cw))
+              async def main():
+                  server = await asyncio.start_server(handle, "127.0.0.1", 0)
+                  with open(OUT + "/proxy.port", "w") as f:
+                      f.write(str(server.sockets[0].getsockname()[1]))
+                  with open(OUT + "/proxy.pid", "w") as f:
+                      f.write(str(os.getpid()))
+                  await asyncio.sleep(LIFE)
+              asyncio.run(main())
+
+        - name: Write the inner play
+          copy:
+            dest: "{{ r33_tmp.path }}/inner.yml"
+            mode: "0600"
+            content: |
+              - hosts: localhost
+                connection: local
+                gather_facts: false
+                collections:
+                  - keepersecurity.keeper_secrets_manager
+                vars:
+                  keeper_config_file: "{% raw %}{{ config_file }}{% endraw %}"
+                tasks:
+                  - keeper_get:
+                      uid: "{% raw %}{{ rec_uid }}{% endraw %}"
+                      file: r25-attach.txt
+                    ignore_errors: true
+                  - keeper_get:
+                      notation: "keeper://{% raw %}{{ rec_uid }}{% endraw %}/file/r25-attach.txt"
+                    ignore_errors: true
+                  - debug:
+                      msg: "{% raw %}{{ lookup(r33_lookup_name, notation='keeper://' ~ rec_uid ~ '/file/r25-attach.txt') }}{% endraw %}"
+                    ignore_errors: true
+
+        - name: Write the file content
+          copy:
+            dest: "{{ r33_tmp.path }}/payload.txt"
+            content: "R33-KSM-1672-attachment-{{ r33_run }}\n"
+            mode: "0600"
+
+        - name: Create the record with the attached file
+          command: >-
+            {{ ansible_playbook_python }} {{ r33_tmp.path }}/helper.py create {{ config_file }}
+            {{ shared_folder_uid }} K1672-r25-2-{{ r33_run }} {{ r33_tmp.path }}/payload.txt
+          register: r33_created
+          changed_when: true
+
+        - name: Remember the UIDs
+          set_fact:
+            r33_uid: "{{ (r33_created.stdout | from_json).uid }}"
+            r33_file_uid: "{{ (r33_created.stdout | from_json).file_uid }}"
+
+        - name: Start the proxy
+          command: "{{ ansible_playbook_python }} {{ r33_tmp.path }}/proxy.py {{ r33_api_host }} {{ r33_tmp.path }} 180"
+          async: 180
+          poll: 0
+          register: r33_proxy_job
+
+        - name: Wait for the proxy port
+          wait_for:
+            path: "{{ r33_tmp.path }}/proxy.port"
+            timeout: 20
+            state: present
+
+        - name: Read the proxy port and PID
+          set_fact:
+            r33_port: "{{ lookup('file', r33_tmp.path ~ '/proxy.port') }}"
+
+        - name: Run the inner play through the proxy, with -vvv
+          command: >-
+            {{ ansible_playbook_python }} -m ansible.cli.playbook {{ r33_tmp.path }}/inner.yml -vvv
+            -i localhost, -e ansible_python_interpreter={{ ansible_playbook_python }} -e r33_lookup_name={{ r33_lookup_name }} -e rec_uid={{ r33_uid }} -e config_file={{ config_file }}
+          args:
+            # The directory where ansible-playbook was started, so that a raw pip run finds its ansible.cfg.
+            chdir: "{{ lookup('env', 'PWD') }}"
+          environment:
+            https_proxy: "http://127.0.0.1:{{ r33_port }}"
+            HTTPS_PROXY: "http://127.0.0.1:{{ r33_port }}"
+            no_proxy: ""
+            NO_PROXY: ""
+            ANSIBLE_NOCOLOR: "1"
+            ANSIBLE_HOME: "{{ r33_tmp.path }}/ahome"
+            KSM_CONFIG_SKIP_MODE_WARNING: "TRUE"
+            OBJC_DISABLE_INITIALIZE_FORK_SAFETY: "YES"
+          register: r33_inner
+          changed_when: false
+          failed_when: false
+
+        - name: Read the proxy log
+          set_fact:
+            r33_proxy_log: "{{ lookup('file', r33_tmp.path ~ '/proxy.log') }}"
+
+        - name: Assert the failure was forced on the attachment request only
+          assert:
+            that:
+              - "'TUNNEL ' ~ r33_api_host in r33_proxy_log"
+              - "'REFUSE ' in r33_proxy_log"
+              - r33_inner.stdout is search('ignored=3')
+              - "r33_inner.stdout | regex_findall('fatal: \\\\[localhost\\\\]: FAILED') | length == 3"
+              - "'not found' not in r33_inner.stdout"
+              - r33_inner.stdout | regex_findall('The file download failed \\(\\w+\\)\\.') | length >= 3
+            success_msg: "PASS [R33.2a]: the API request was tunnelled, the attachment request was refused, all three routes failed with the fixed message"
+
+        - name: Assert that no URL text reached the output or the tracebacks
+          assert:
+            that:
+              - "item not in (r33_inner.stdout ~ r33_inner.stderr)"
+            fail_msg: "FAIL [R33.2b]: the output holds {{ item }}"
+            quiet: true
+          loop:
+            - "X-Amz"
+            - "Signature"
+            - "Credential"
+            - "Security-Token"
+            - "Max retries exceeded"
+            - "{{ r33_file_uid }}"
+            - "{{ r33_proxy_log | regex_search('REFUSE (\\S+)', '\\1') | first }}"
+          loop_control:
+            label: "forbidden text"
+
+        - name: Report
+          debug:
+            msg: "PASS [R33.2b]: no signed URL, query, file UID or storage host text in the output or the traceback"
+
+      always:
+        - name: Stop the proxy by its exact PID
+          command: "kill {{ lookup('file', r33_tmp.path ~ '/proxy.pid') }}"
+          when: (r33_tmp.path ~ '/proxy.pid') is file
+          failed_when: false
+          changed_when: true
+
+        - name: Delete the record by its exact UID
+          command: "{{ ansible_playbook_python }} {{ r33_tmp.path }}/helper.py delete {{ config_file }} {{ r33_uid }}"
+          when: r33_uid is defined
+          changed_when: true
+
+        - name: Remove the scratch directory
+          file:
+            path: "{{ r33_tmp.path }}"
+            state: absent

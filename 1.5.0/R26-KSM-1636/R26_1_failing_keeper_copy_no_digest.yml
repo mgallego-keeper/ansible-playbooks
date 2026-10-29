@@ -1,0 +1,115 @@
+---
+# R26.1: a FAILING keeper_copy returns no digest of the secret and no checksum, md5sum or size key
+# (KSM-1636).
+#
+# Before the fix keeper_copy returned the built-in copy result unchanged. When the copy failed
+# (here: the destination directory does not exist) that result carried "checksum", the unsalted
+# SHA-1 of the secret, and the task printed it at default verbosity. A short secret can be
+# brute-forced offline from a SHA-1. After the fix keeper_copy returns only a fixed list of result
+# keys and drops "checksum" from invocation.module_args.
+#
+# What this does: creates two throwaway records (a plain password and `pa"ss\word`), runs
+# keeper_copy on each password into a directory that does not exist, and checks the registered
+# result of every failed copy:
+#   - it really failed with the "does not exist" message (a run that failed for another reason
+#     proves nothing),
+#   - it has no checksum, md5sum or size key, and invocation.module_args has no checksum,
+#   - its JSON text holds neither the secret nor the SHA-1, MD5 or SHA-256 of the secret.
+# It removes the records whatever happens.
+- name: "R26.1: a failing keeper_copy result carries no digest, checksum, md5sum or size"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+
+  tasks:
+    - name: Fix a tag and the two secrets for this run
+      set_fact:
+        run_tag: "{{ now(fmt='%Y%m%d_%H%M%S') }}"
+        r26_secrets:
+          - "r26-1-plain-{{ now(fmt='%Y%m%d%H%M%S') }}"
+          - 'pa"ss\word'
+
+    - name: Run the checks, then clean up
+      block:
+        - name: Create the throwaway records
+          keeper_create:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            record_type: login
+            title: "R26.1 {{ idx }} - {{ run_tag }}"
+            fields:
+              - type: login
+                value: "r26-1-user"
+              - type: password
+                value: "{{ item }}"
+          loop: "{{ r26_secrets }}"
+          loop_control:
+            index_var: idx
+            label: "secret {{ idx }}"
+          register: made
+          no_log: true
+
+        - name: Keep only the record uids (a uid is not a secret, the loop item of the create task is)
+          set_fact:
+            r26_uids: "{{ made.results | map(attribute='record_uid') | list }}"
+
+        - name: keeper_copy each password into a directory that does not exist (must fail)
+          keeper_copy:
+            notation: "{{ item }}/field/password"
+            dest: "/nonexistent-r26-1-dir/out.txt"
+          loop: "{{ r26_uids }}"
+          loop_control:
+            label: "{{ item }}"
+          register: copied
+          ignore_errors: true
+
+        - name: Assert every copy failed for the expected reason
+          assert:
+            that:
+              - item.failed
+              - "'does not exist' in item.msg"
+            success_msg: "PASS [R26.1]: the copy failed with: {{ item.msg }}"
+            fail_msg: "FAIL [R26.1]: the copy did not fail the expected way (failed={{ item.failed }}, msg={{ item.msg | default('none') }})"
+          loop: "{{ copied.results }}"
+          loop_control:
+            label: "{{ item.item }}"
+
+        - name: Assert the failure result has no checksum, md5sum or size key
+          assert:
+            that:
+              - "'checksum' not in item"
+              - "'md5sum' not in item"
+              - "'size' not in item"
+              - "'checksum' not in ((item.invocation | default({})).module_args | default({}))"
+            success_msg: "PASS [R26.1]: result keys are {{ item.keys() | sort | list }}"
+            fail_msg: "FAIL [R26.1]: the failed keeper_copy result still has a checksum, md5sum or size key: {{ item.keys() | sort | list }}"
+          loop: "{{ copied.results }}"
+          loop_control:
+            label: "{{ item.item }}"
+
+        - name: Assert the result text holds no digest of the secret and not the secret
+          assert:
+            that:
+              - (item.0 | hash('sha1')) not in (item.1 | to_json)
+              - (item.0 | hash('md5')) not in (item.1 | to_json)
+              - (item.0 | hash('sha256')) not in (item.1 | to_json)
+              - item.0 not in (item.1 | to_json)
+            success_msg: "PASS [R26.1]: no SHA-1, MD5, SHA-256 or raw secret in the failed result"
+            fail_msg: "FAIL [R26.1]: the failed keeper_copy result holds a digest or the raw secret of record {{ item.1.item }}"
+          loop: "{{ r26_secrets | zip(copied.results) | list }}"
+          loop_control:
+            label: "{{ item.1.item }}"
+
+      always:
+        - name: Remove whatever throwaway records exist
+          keeper_remove:
+            uid: "{{ item }}"
+          loop: "{{ made.results | default([]) | selectattr('record_uid', 'defined') | map(attribute='record_uid') | list }}"
+          loop_control:
+            label: "{{ item }}"
+          ignore_errors: true
+          no_log: true

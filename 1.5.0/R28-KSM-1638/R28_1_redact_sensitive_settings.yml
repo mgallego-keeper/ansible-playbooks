@@ -1,0 +1,118 @@
+---
+# R28.1: keeper_redact masks keeper_token, keeper_record_cache_secret, and a keeper_config or
+# keeper_private_key that holds a dictionary or a list (KSM-1638).
+#
+# Before the fix the callback masked only values that were not a dictionary or a list, and
+# its key list had no keeper_token and no keeper_record_cache_secret. A debug of
+# {keeper_config: {clientId: ..}} printed the whole dictionary, a keeper_private_key list
+# printed in full, and keeper_token and keeper_record_cache_secret printed as plain text.
+#
+# What this does: runs kt_inner_config.yml as its own ansible-playbook process, with made-up
+# sentinel values, three times: with keeper_redact as the stdout callback at default and -v
+# (-v also prints the set_fact results), and with the default stdout callback at -v as a
+# control. It asserts no sentinel appears in the redacted output and **** does, and that
+# every sentinel appears in the control (so the redacted result is not empty by accident).
+# Override the callback name with KR_CALLBACK. Creates nothing in the vault and removes its
+# scratch directory whatever happens.
+- name: "R28.1: keeper_redact masks Keeper connection settings printed by debug and set_fact"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    kt_callback: "{{ lookup('env', 'KR_CALLBACK') | default(('keeper_redact' if (surface | default('pip')) == 'pip' else 'keepersecurity.keeper_secrets_manager.keeper_redact'), true) }}"
+    kt_vars:
+      kt_private_key:
+        - "KT-PRIVKEY-ONE-{{ kt_run_id }}"
+        - "KT-PRIVKEY-TWO-{{ kt_run_id }}"
+      kt_config:
+        clientId: "KT-CLIENTID-DICT-{{ kt_run_id }}"
+        appKey: "KT-APPKEY-DICT-{{ kt_run_id }}"
+      kt_token: "US:KT-TOKEN-{{ kt_run_id }}"
+      kt_cache_secret: "KT-CACHESECRET-{{ kt_run_id }}"
+      kt_client_id: "KT-CLIENTID-SET-{{ kt_run_id }}"
+    kt_sentinels:
+      - "KT-PRIVKEY-ONE-{{ kt_run_id }}"
+      - "KT-PRIVKEY-TWO-{{ kt_run_id }}"
+      - "KT-CLIENTID-DICT-{{ kt_run_id }}"
+      - "KT-APPKEY-DICT-{{ kt_run_id }}"
+      - "KT-TOKEN-{{ kt_run_id }}"
+      - "KT-CACHESECRET-{{ kt_run_id }}"
+      - "KT-CLIENTID-SET-{{ kt_run_id }}"
+
+  tasks:
+    - name: Fix the run id once (a vars entry that calls now() is evaluated again at each use)
+      set_fact:
+        kt_run_id: "{{ now(fmt='%Y%m%d%H%M%S') }}"
+
+    - name: Run the scenario and always clean up
+      block:
+        - name: Make a scratch directory for captured output
+          tempfile:
+            state: directory
+            suffix: ksmv_r20_1
+          register: kt_dir
+
+        - name: Run the inner playbook with the callbacks and verbosity levels under test
+          shell: >-
+            {{ ap_path | default('/usr/local/bin/ansible-playbook' if (surface | default('pip')) in ['tower', 'awx'] else (ansible_playbook_python | dirname ~ '/ansible-playbook')) }} {{ playbook_dir }}/kt_inner_config.yml {{ item.flag }}
+            -e {{ kt_vars | to_json | quote }}
+            > {{ kt_dir.path }}/out_{{ item.name }}.txt 2>&1
+          environment:
+            ANSIBLE_STDOUT_CALLBACK: "{{ item.callback }}"
+            ANSIBLE_NOCOLOR: "1"
+            KSM_CONFIG_SKIP_MODE_WARNING: "TRUE"
+            ANSIBLE_INVENTORY_UNPARSED_FAILED: "False"
+            OBJC_DISABLE_INITIALIZE_FORK_SAFETY: "YES"
+          loop:
+            - {name: redact_default, flag: "", callback: "{{ kt_callback }}"}
+            - {name: redact_v, flag: "-v", callback: "{{ kt_callback }}"}
+            - {name: control_v, flag: "-v", callback: "default"}
+          register: kt_runs
+          changed_when: false
+          failed_when: false
+
+        - name: Assert every inner run completed
+          assert:
+            that: item.rc == 0
+            fail_msg: "FAIL [R28.1 setup]: inner run {{ item.item.name }} exited {{ item.rc }}"
+            quiet: true
+          loop: "{{ kt_runs.results }}"
+          loop_control:
+            label: "{{ item.item.name }}"
+
+        - name: Read the captured output
+          slurp:
+            src: "{{ kt_dir.path }}/out_{{ item }}.txt"
+          loop: [redact_default, redact_v, control_v]
+          register: kt_out
+
+        - name: Assert no sentinel is in the redacted output and the marker is
+          vars:
+            kt_text: "{{ item.content | b64decode }}"
+          assert:
+            that:
+              - kt_text | length > 0
+              - "'****' in kt_text"
+              - kt_sentinels | select('in', kt_text) | list | length == 0
+            success_msg: "PASS [R28.1 {{ item.item }}]: {{ kt_sentinels | length }} sentinels absent, **** present"
+            fail_msg: "FAIL [R28.1 {{ item.item }}]: leaked {{ kt_sentinels | select('in', kt_text) | list | length }} of {{ kt_sentinels | length }} sentinels"
+          loop: "{{ kt_out.results | rejectattr('item', 'equalto', 'control_v') | list }}"
+          loop_control:
+            label: "{{ item.item }}"
+
+        - name: Assert the control (default callback) printed every sentinel
+          vars:
+            kt_control: "{{ (kt_out.results | selectattr('item', 'equalto', 'control_v') | first).content | b64decode }}"
+          assert:
+            that:
+              - kt_sentinels | reject('in', kt_control) | list | length == 0
+            success_msg: "PASS [R28.1 control]: the default callback prints all {{ kt_sentinels | length }} sentinels, so the redacted runs are a real comparison"
+            fail_msg: "FAIL [R28.1 control]: sentinels missing from the control output: {{ kt_sentinels | reject('in', kt_control) | list }}"
+
+      always:
+        - name: Remove the scratch directory
+          file:
+            path: "{{ kt_dir.path }}"
+            state: absent
+          when: kt_dir is defined and kt_dir.path is defined

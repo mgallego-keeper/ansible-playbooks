@@ -1,0 +1,29 @@
+---
+# Inner playbook for R26.3. Not a test by itself (the runner skips it: the name does not start
+# with A or R). keeper_get learns two secrets, then the BUILT-IN copy module writes each one into
+# a directory that does not exist, so the copy fails and its result (with the SHA-1 of the content)
+# is printed. The outer playbook runs it with a chosen stdout callback and reads what it printed.
+# Expects -e: keeper_config_file, cd_uids (list of two record uids).
+- name: "KSM-1636 inner: failing built-in copy of a content that keeper_get learned"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
+
+  tasks:
+    - name: keeper_get learns each password
+      keeper_get:
+        uid: "{{ item }}"
+        field: password
+      loop: "{{ cd_uids }}"
+      register: cd_got
+
+    - name: Built-in copy of the learned value into a missing directory (must fail)
+      ansible.builtin.copy:
+        content: "{{ item.value }}"
+        dest: /nonexistent-r26-3-dir/out.txt
+      loop: "{{ cd_got.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      ignore_errors: true

@@ -1,0 +1,155 @@
+---
+# run_batch.yml: run the KSM Ansible 1.5.0 regression playbooks one after the other inside ONE AAP job and
+# print a PASS / FAIL / SKIP table at the end.
+#
+# Why: a job template runs one playbook. Creating one template per playbook is slow, so this wrapper starts each
+# playbook as its own ansible-playbook process inside the same execution environment. A failing playbook does not stop
+# the batch. The job fails at the end when any playbook failed.
+#
+# Job template settings:
+#   Playbook:      1.5.0/run_batch.yml
+#   Credentials:   the KSM credential that injects keeper_config (Base64 KSM configuration). The batch decodes it into a
+#                  private file for the run and deletes the file at the end.
+#   Variables:     shared_folder_uid: "<UID of a dedicated test shared folder the application can write to>"
+#                  second_shared_folder_uid: "<UID of a second writable shared folder; optional>"
+#                  non_editable_record_uid: "<UID of a record that the application can read but not delete; optional>"
+#                  surface: awx
+#   Optional variables:
+#                  batch_only: ["R36", "R37"]   run only the sections whose directory name starts with one of these
+#                  batch_skip: ["R35_1"]        also skip these playbooks (R<section>_<number>)
+#                  ap_path: /usr/local/bin/ansible-playbook
+#                  batch_pause: 5               seconds to wait between playbooks (the vault throttles rapid calls)
+#
+# The playbooks create and delete real records and folders in shared_folder_uid. Use a dedicated test folder and do not
+# run two batches against it at the same time.
+- name: "KSM 1.5.0 regression batch"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    batch_only: []
+    batch_skip: []
+    batch_pause: 5
+    batch_timeout: 1500
+    ap_path: /usr/local/bin/ansible-playbook
+    # Playbooks that read the source checkout (repo_path) or the pip package. They cannot run in an execution
+    # environment, so the batch reports them as skipped, like run_and_report.py does for the awx surface.
+    batch_host_only:
+      - R27_1
+      - R27_2
+      - R29_2
+      - R29_3
+      - R30_1
+      - R31_1
+      - R32_3
+      - R33_3
+      - R34_2
+      - R34_3
+      - R35_2
+      - R36_2
+      - R36_3
+      - R37_2
+      - R37_3
+
+  tasks:
+    - name: Stop with a clear message when the Base64 KSM configuration is missing
+      assert:
+        that:
+          - keeper_config is defined
+          - keeper_config | length > 0
+          - shared_folder_uid is defined
+          - shared_folder_uid | length > 0
+        fail_msg: "Attach the KSM credential (it injects keeper_config) and set shared_folder_uid in the job template variables."
+      no_log: true
+
+    - name: Make a private directory for this batch
+      tempfile:
+        state: directory
+        prefix: ksm_batch_
+      register: batch_dir
+
+    - name: Write the KSM configuration to a private file (many playbooks, and the playbooks they start, read config_file)
+      copy:
+        dest: "{{ batch_dir.path }}/ksm-config.json"
+        mode: "0600"
+        content: "{{ keeper_config | b64decode }}"
+      no_log: true
+
+    - name: Write the variables that every playbook gets
+      copy:
+        dest: "{{ batch_dir.path }}/vars.json"
+        mode: "0600"
+        content: >-
+          {{ {
+            'config_file': batch_dir.path ~ '/ksm-config.json',
+            'shared_folder_uid': shared_folder_uid,
+            'second_shared_folder_uid': second_shared_folder_uid | default(''),
+            'non_editable_record_uid': non_editable_record_uid | default(''),
+            'surface': surface | default('awx'),
+            'ap_path': ap_path
+          } | to_json }}
+      no_log: true
+
+    - name: Find the regression playbooks
+      find:
+        paths: "{{ playbook_dir }}"
+        patterns: 'R*_*.yml'
+        recurse: true
+        use_regex: false
+      register: batch_found
+
+    - name: Build the ordered list of playbooks to run
+      set_fact:
+        batch_list: >-
+          {{ batch_list | default([]) + [ {
+               'path': item.path,
+               'dir': item.path | dirname,
+               'name': item.path | basename,
+               'id': (item.path | basename).split('_')[0] ~ '_' ~ (item.path | basename).split('_')[1],
+               'sort': ((item.path | dirname | basename).split('-')[0][1:] | int) * 1000
+                       + ((item.path | basename).split('_')[1] | int),
+               'host_only': ((item.path | basename).split('_')[0] ~ '_' ~ (item.path | basename).split('_')[1]) in batch_host_only
+             } ] }}
+      loop: "{{ batch_found.files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+      when:
+        - (item.path | dirname | basename) is match('^R[0-9]+-')
+        - (item.path | basename) is match('^R[0-9]+_[0-9]+_')
+        - (batch_only | length == 0) or ((item.path | dirname | basename).split('-')[0] in batch_only)
+        - ((item.path | basename).split('_')[0] ~ '_' ~ (item.path | basename).split('_')[1]) not in batch_skip
+
+    - name: Sort the list
+      set_fact:
+        batch_list: "{{ batch_list | default([]) | sort(attribute='sort') }}"
+
+    - name: Show the plan
+      debug:
+        msg: "{{ batch_list | default([]) | length }} playbooks: {{ batch_list | default([]) | map(attribute='id') | join(' ') }}"
+
+    - name: Run each playbook
+      include_tasks: run_one.yml
+      loop: "{{ batch_list | default([]) }}"
+      loop_control:
+        loop_var: pb
+        label: "{{ pb.name }}"
+
+    - name: Remove the private directory
+      file:
+        path: "{{ batch_dir.path }}"
+        state: absent
+
+    - name: Show the result table
+      debug:
+        msg: "{{ ['RESULT  TIME     PLAYBOOK'] + (batch_results | default([]) | map(attribute='line') | list) }}"
+
+    - name: Fail the job when any playbook failed
+      assert:
+        that: (batch_results | default([]) | selectattr('result', 'equalto', 'FAIL') | list | length) == 0
+        success_msg: >-
+          {{ batch_results | default([]) | selectattr('result', 'equalto', 'PASS') | list | length }} passed,
+          {{ batch_results | default([]) | selectattr('result', 'equalto', 'SKIP') | list | length }} skipped, 0 failed.
+        fail_msg: >-
+          {{ batch_results | default([]) | selectattr('result', 'equalto', 'FAIL') | list | length }} playbook(s) failed:
+          {{ batch_results | default([]) | selectattr('result', 'equalto', 'FAIL') | map(attribute='name') | list | join(', ') }}

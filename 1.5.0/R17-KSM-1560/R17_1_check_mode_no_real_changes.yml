@@ -1,0 +1,123 @@
+# R17.1: keeper_create, keeper_set, and keeper_remove make no real change in check mode,
+# and each predicts the changed value a real run would report (KSM-1560).
+- name: "R17.1: check mode makes no real change"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    create_title: "R17-KSM-1560 Regression Create"
+
+  tasks:
+    - name: Create a record in check mode
+      keeper_create:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        record_type: login
+        title: "{{ create_title }}"
+        generate_password: true
+        fields:
+          - type: login
+            value: "r17-1@example.com"
+      register: create_check
+      check_mode: true
+      no_log: true
+
+    - name: Assert check mode predicted changed=true
+      assert:
+        that:
+          - create_check.changed == true
+        success_msg: "PASS [R17.1]: keeper_create check_mode changed=true"
+        fail_msg: "FAIL [R17.1]: {{ create_check }}"
+
+    - name: Verify the record was NOT created
+      keeper_get:
+        title: "{{ create_title }}"
+        field: login
+      register: create_verify
+      ignore_errors: true
+      no_log: true
+
+    - name: Assert the lookup fails
+      assert:
+        that:
+          - create_verify is failed
+        success_msg: "PASS [R17.1]: No record created in check mode"
+        fail_msg: "FAIL [R17.1]: A record was created in check mode! {{ create_verify }}"
+
+    - name: Create a real fixture record for keeper_set/keeper_remove checks
+      keeper_create:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        record_type: login
+        title: "{{ create_title }} - Fixture"
+        generate_password: true
+        fields:
+          - type: login
+            value: "r17-1-fixture@example.com"
+      register: fixture
+      no_log: true
+
+    - name: Preview a password change in check mode
+      keeper_set:
+        uid: "{{ fixture.record_uid }}"
+        field: password
+        value: "R17-1-Should-Not-Save"
+      register: set_check
+      check_mode: true
+      no_log: true
+
+    - name: Assert check mode predicted changed=true but updated=false
+      assert:
+        that:
+          - set_check.changed == true
+          - set_check.updated == false
+        success_msg: "PASS [R17.1]: keeper_set check_mode changed=true, updated=false"
+        fail_msg: "FAIL [R17.1]: {{ set_check }}"
+
+    - name: Read the password for real
+      keeper_get:
+        uid: "{{ fixture.record_uid }}"
+        field: password
+      register: password_check
+      no_log: true
+
+    - name: Assert the password was not changed
+      assert:
+        that:
+          - password_check.value != "R17-1-Should-Not-Save"
+        success_msg: "PASS [R17.1]: Password unchanged after keeper_set check mode"
+        fail_msg: "FAIL [R17.1]: Password changed during check mode!"
+
+    - name: Remove the fixture in check mode
+      keeper_remove:
+        uid: "{{ fixture.record_uid }}"
+      register: remove_check
+      check_mode: true
+
+    - name: Assert check mode predicted changed=true
+      assert:
+        that:
+          - remove_check.changed == true
+        success_msg: "PASS [R17.1]: keeper_remove check_mode changed=true"
+        fail_msg: "FAIL [R17.1]: {{ remove_check }}"
+
+    - name: Verify the fixture still exists
+      keeper_get:
+        uid: "{{ fixture.record_uid }}"
+        field: login
+      register: fixture_verify
+      no_log: true
+
+    - name: Assert the fixture was not deleted
+      assert:
+        that:
+          - fixture_verify is not failed
+        success_msg: "PASS [R17.1]: Fixture not deleted in check mode"
+        fail_msg: "FAIL [R17.1]: Fixture was deleted in check mode! {{ fixture_verify }}"
+
+    - name: Clean up the fixture for real
+      keeper_remove:
+        uid: "{{ fixture.record_uid }}"
+      ignore_errors: true

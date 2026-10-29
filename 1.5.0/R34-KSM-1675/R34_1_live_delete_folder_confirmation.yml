@@ -1,0 +1,221 @@
+---
+# R34.1: live keeper_delete_folder still deletes, stays idempotent, and respects check mode and force (KSM-1675).
+#
+# KSM-1675 changed how a delete is CONFIRMED when the server sends no exact status for the folder (the folder is
+# read back and an unreadable target is no longer taken for "gone"). A live vault cannot produce an unreadable
+# folder, so the unreadable case is covered offline by R34.2 and R34.3. This case proves that the normal live paths are
+# unchanged: success, repeat delete, check mode, the non-empty refusal and force. It passes before and after the fix.
+#
+# Run it with: -e config_file=<KSM config JSON> -e shared_folder_uid=<writable classic shared folder UID>
+#
+# Raw pip / local surface note: this playbook uses collections: [keepersecurity.keeper_secrets_manager] and
+# short plugin names. On a raw pip install (plugins loaded from action_plugins= in ansible.cfg) set
+# ANSIBLE_COLLECTIONS_PATH to an EMPTY directory, so that a stale collection under ~/.ansible/collections
+# cannot shadow the code under test. Prove which code ran with ANSIBLE_DEBUG ("Loading ActionModule" lines).
+#
+# What this does: makes the parent folder K1675-p-<run id> in shared_folder_uid and the child K1675-c-<run id> in it, then
+#   1. delete of the parent in check mode: changed=true, and the parent and child are still there
+#   2. delete of the parent without force: fails "is not empty", parent and child are still there
+#   3. delete of the child in check mode: changed=true, child still there
+#   4. delete of the child: changed=true, with the child's UID and name; the parent now has 0 children
+#   5. delete of the child again: changed=false, "was not found ... Nothing was deleted."
+#   6. create a new child, then delete the parent with force_deletion: changed=true; the parent is gone
+# Cleanup (always): deletes the parent by its exact UID with force, only after reading the folder by UID and
+# checking that its name starts with K1675-. A parent that is already gone is not an error.
+- name: "R34.1: live delete folder confirmation, repeat, check mode and force"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+
+  tasks:
+    - name: Fix the run id once (a vars entry that calls now() is evaluated again at each use)
+      set_fact:
+        r34_run: "{{ now(fmt='%Y%m%d%H%M%S') }}"
+
+    - name: Set the names from the run id
+      set_fact:
+        r34_parent_name: "K1675-p-{{ r34_run }}"
+        r34_child_name: "K1675-c-{{ r34_run }}"
+
+    - name: Run the scenario and always clean up
+      block:
+        - name: Create the parent folder
+          keeper_create_folder:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            folder_name: "{{ r34_parent_name }}"
+          register: r34_parent
+          retries: 3
+          delay: 70
+          until: r34_parent is not failed
+
+        - name: Create the child folder
+          keeper_create_folder:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            subfolder_uid: "{{ r34_parent.folder_uid }}"
+            folder_name: "{{ r34_child_name }}"
+          register: r34_child
+          retries: 3
+          delay: 70
+          until: r34_child is not failed
+
+        - name: Check mode delete of the parent
+          keeper_delete_folder:
+            folder_uid: "{{ r34_parent.folder_uid }}"
+          check_mode: true
+          register: r34_parent_check
+          ignore_errors: true
+
+        - name: Check mode delete of the parent with force
+          keeper_delete_folder:
+            folder_uid: "{{ r34_parent.folder_uid }}"
+            force_deletion: true
+          check_mode: true
+          register: r34_parent_force_check
+
+        - name: Read the children after the check mode runs
+          keeper_get_folder:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            subfolder_uid: "{{ r34_parent.folder_uid }}"
+            include_subfolders: true
+          register: r34_after_check
+
+        - name: Assert check mode deleted nothing
+          assert:
+            that:
+              - r34_parent_check is failed
+              - "'is not empty' in r34_parent_check.msg"
+              - r34_parent_force_check is changed
+              - r34_parent_force_check.folder_uid == r34_parent.folder_uid
+              - r34_after_check.subfolders | map(attribute='folder_uid') | list == [r34_child.folder_uid]
+            success_msg: "PASS [R34.1 check mode]: check mode sent no request: the non-force check says 'is not empty', the force check predicts changed=true, parent and child are still there"
+            fail_msg: "FAIL [R34.1 check mode]: {{ r34_parent_check }} {{ r34_parent_force_check }} children={{ r34_after_check.subfolders }}"
+
+        - name: Delete the non-empty parent without force
+          keeper_delete_folder:
+            folder_uid: "{{ r34_parent.folder_uid }}"
+          register: r34_nonforce
+          ignore_errors: true
+
+        - name: Read the children after the refused delete
+          keeper_get_folder:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            subfolder_uid: "{{ r34_parent.folder_uid }}"
+            include_subfolders: true
+          register: r34_after_nonforce
+
+        - name: Assert the non-empty delete was refused and nothing was deleted
+          assert:
+            that:
+              - r34_nonforce is failed
+              - "'is not empty' in r34_nonforce.msg"
+              - r34_after_nonforce.subfolders | length == 1
+            success_msg: "PASS [R34.1 non-empty]: delete without force fails with 'is not empty', parent and child are still there"
+            fail_msg: "FAIL [R34.1 non-empty]: {{ r34_nonforce }} children={{ r34_after_nonforce.subfolders }}"
+
+        - name: Check mode delete of the child
+          keeper_delete_folder:
+            folder_uid: "{{ r34_child.folder_uid }}"
+          check_mode: true
+          register: r34_child_check
+
+        - name: Read the children after the child check mode run
+          keeper_get_folder:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            subfolder_uid: "{{ r34_parent.folder_uid }}"
+            include_subfolders: true
+          register: r34_after_child_check
+
+        - name: Delete the child
+          keeper_delete_folder:
+            folder_uid: "{{ r34_child.folder_uid }}"
+          register: r34_child_deleted
+
+        - name: Read the children after the delete
+          keeper_get_folder:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            subfolder_uid: "{{ r34_parent.folder_uid }}"
+            include_subfolders: true
+          register: r34_after_delete
+
+        - name: Delete the child again
+          keeper_delete_folder:
+            folder_uid: "{{ r34_child.folder_uid }}"
+          register: r34_child_again
+
+        - name: Assert the delete, the check mode run before it, and the repeat
+          assert:
+            that:
+              - r34_child_check is changed
+              - r34_after_child_check.subfolders | length == 1
+              - r34_child_deleted is changed
+              - r34_child_deleted.folder_uid == r34_child.folder_uid
+              - r34_child_deleted.folder_name == r34_child_name
+              - r34_after_delete.subfolders | length == 0
+              - r34_child_again is not changed
+              - r34_child_again.folder_name is none
+              - r34_child_again.msg == 'The folder ' ~ r34_child.folder_uid ~ ' was not found, or it is not shared to this KSM application. Nothing was deleted.'
+            success_msg: "PASS [R34.1 delete and repeat]: child deleted (changed=true, right UID and name, parent has 0 children); repeat changed=false 'was not found ... Nothing was deleted.'"
+            fail_msg: "FAIL [R34.1 delete and repeat]: {{ r34_child_deleted }} children={{ r34_after_delete.subfolders }} repeat={{ r34_child_again }}"
+
+        - name: Create a new child so that force has something to delete
+          keeper_create_folder:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            subfolder_uid: "{{ r34_parent.folder_uid }}"
+            folder_name: "{{ r34_child_name }}-2"
+          register: r34_child2
+          retries: 3
+          delay: 70
+          until: r34_child2 is not failed
+
+        - name: Delete the parent with force
+          keeper_delete_folder:
+            folder_uid: "{{ r34_parent.folder_uid }}"
+            force_deletion: true
+          register: r34_forced
+
+        - name: Look for the parent after the forced delete
+          keeper_get_folder:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            folder_name: "{{ r34_parent_name }}"
+          register: r34_gone
+          failed_when: false
+
+        - name: Look for the new child by its UID
+          keeper_get_folder:
+            subfolder_uid: "{{ r34_child2.folder_uid }}"
+          register: r34_gone_child
+          failed_when: false
+
+        - name: Assert force deleted the parent and its child
+          assert:
+            that:
+              - r34_forced is changed
+              - r34_forced.folder_uid == r34_parent.folder_uid
+              - r34_forced.folder_name == r34_parent_name
+              - "'No folder named' in r34_gone.msg"
+              - "'was not found' in r34_gone_child.msg"
+            success_msg: "PASS [R34.1 force]: force delete of the parent with a child returned changed=true; the parent and the child are gone"
+            fail_msg: "FAIL [R34.1 force]: {{ r34_forced }} lookup={{ r34_gone }} child={{ r34_gone_child }}"
+
+      always:
+        - name: Read the parent by its exact UID, if it was created
+          keeper_get_folder:
+            subfolder_uid: "{{ r34_parent.folder_uid }}"
+          register: r34_cleanup_read
+          when: r34_parent.folder_uid is defined
+          failed_when: false
+
+        - name: Delete the parent (and anything left in it) by its exact UID
+          keeper_delete_folder:
+            folder_uid: "{{ r34_parent.folder_uid }}"
+            force_deletion: true
+          when:
+            - r34_parent.folder_uid is defined
+            - r34_cleanup_read is succeeded
+            - r34_cleanup_read.folder_name is defined
+            - r34_cleanup_read.folder_name.startswith('K1675-')

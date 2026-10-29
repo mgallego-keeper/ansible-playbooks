@@ -1,0 +1,109 @@
+---
+# R36.3: keeper_set fails closed on an ambiguous update target, raw pip / source tree (KSM-1666).
+#
+# Offline companion of R36.1. It runs KeeperAnsible.set_value() (the code behind keeper_set) against the real
+# keeper-secrets-manager-core SDK and the repo's fake server (tests/keeper_set_cache_test.py::_NotesServer: real encrypted
+# records, real update_secret handling). No network, nothing is created in any vault. It also covers a response that
+# holds two live records with the SAME UID, which a live vault cannot produce.
+#
+# After the fix: a list/tuple with one entry is accepted; a list of 2, an empty list, a set or a dict is refused with
+# "A record update requires a single UID or title." before any vault read; a title that matches nothing (or an unknown UID)
+# fails with "Could not find any records that meet the criteria."; a title that matches 2 records fails with
+# "Found multiple records for the selection. ..."; two live records with one UID fail with "Found multiple live records for
+# a selected UID. A record update requires a unique target."; and in every failing case NO update request is sent.
+# Before the fix, a list of 2 UIDs saved one of the two records (update_requests=1). Expected to FAIL against code built before the fix.
+#
+# kt_update_target_validation.py imports the plain `keeper_secrets_manager_ansible` package from the interpreter that runs
+# ansible-playbook (pip install, editable install or a source tree on PYTHONPATH), NOT the Galaxy collection.
+# Run it with an EMPTY ANSIBLE_COLLECTIONS_PATH.
+# It needs repo_path = integration/keeper_secrets_manager_ansible (for the stand-in server only).
+- name: "R36.3: keeper_set refuses ambiguous update targets, raw pip / source tree"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+
+  tasks:
+    - name: Run set_value against the real SDK
+      command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - "{{ playbook_dir }}/kt_update_target_validation.py"
+          - "{{ repo_path }}"
+      environment:
+        OBJC_DISABLE_INITIALIZE_FORK_SAFETY: "YES"
+        no_proxy: "*"
+      register: r36_run
+      changed_when: false
+
+    - name: Parse the cases
+      set_fact:
+        r36_data: "{{ r36_run.stdout | from_json }}"
+        r36_by_case: "{{ dict((r36_run.stdout | from_json).cases | map(attribute='case') | zip((r36_run.stdout | from_json).cases)) }}"
+
+    - name: Assert the code under test is the pip package, not the Galaxy collection
+      assert:
+        that:
+          - r36_data.package_file is search('keeper_secrets_manager_ansible/__init__.py$')
+          - r36_data.package_file is not search('ansible_collections')
+        success_msg: "PASS [R36.3-src]: tested the pip package, not the Galaxy collection at {{ r36_data.package_file }}"
+        fail_msg: "FAIL [R36.3-src]: wrong code under test: {{ r36_data.package_file }}"
+
+    - name: "Assert (a) a unique title, a UID and a list or tuple of 1 update exactly one record"
+      assert:
+        that:
+          - r36_by_case.title_unique.outcome.changed == true
+          - r36_by_case.uid.outcome.changed == true
+          - r36_by_case.list1_uid.outcome.changed == true
+          - r36_by_case.tuple1_title.outcome.changed == true
+          - "['title_unique', 'uid', 'list1_uid', 'tuple1_title'] | map('extract', r36_by_case) | map(attribute='update_requests') | unique | list == [1]"
+          - r36_by_case.title_unique.notes_after.UNIQ_UID == 'NEW_VALUE'
+          - r36_by_case.title_unique.notes_after.DUP_UID_1 == 'old-dup1'
+        success_msg: "PASS [R36.3a]: unique title, UID, list of 1 and tuple of 1 each send exactly one update"
+        fail_msg: "FAIL [R36.3a]: {{ ['title_unique', 'uid', 'list1_uid', 'tuple1_title'] | map('extract', r36_by_case) | list }}"
+
+    - name: "Assert (b) a list of 2, an empty list, a set and a dict are refused before any vault read"
+      assert:
+        that:
+          - "['list2_uid', 'list2_title', 'set_uid', 'dict_title', 'empty_list_uid'] | map('extract', r36_by_case) | map(attribute='outcome.error') | unique | list == ['ValueError: A record update requires a single UID or title.']"
+          - "['list2_uid', 'list2_title', 'set_uid', 'dict_title', 'empty_list_uid'] | map('extract', r36_by_case) | map(attribute='update_requests') | unique | list == [0]"
+          - "['list2_uid', 'list2_title', 'set_uid', 'dict_title', 'empty_list_uid'] | map('extract', r36_by_case) | map(attribute='reads') | unique | list == [0]"
+          - r36_by_case.list2_uid.notes_after.UNIQ_UID == 'old-uniq'
+          - r36_by_case.list2_uid.notes_after.DUP_UID_1 == 'old-dup1'
+        success_msg: "PASS [R36.3b]: list of 2 / empty / set / dict fail with 'A record update requires a single UID or title.', zero reads, zero updates"
+        fail_msg: "FAIL [R36.3b]: {{ ['list2_uid', 'list2_title', 'set_uid', 'dict_title', 'empty_list_uid'] | map('extract', r36_by_case) | map(attribute='outcome') | list }}"
+
+    - name: "Assert (c) a title that matches 2 records fails and neither record is changed, also in check mode"
+      assert:
+        that:
+          - "['title_duplicate', 'list1_title_duplicate', 'check_mode_duplicate'] | map('extract', r36_by_case) | map(attribute='outcome.error') | unique | list == ['AnsibleError: Found multiple records for the selection. Make sure records have a unique title or use a single UID.']"
+          - "['title_duplicate', 'list1_title_duplicate', 'check_mode_duplicate'] | map('extract', r36_by_case) | map(attribute='update_requests') | unique | list == [0]"
+          - r36_by_case.title_duplicate.notes_after.DUP_UID_1 == 'old-dup1'
+          - r36_by_case.title_duplicate.notes_after.DUP_UID_2 == 'old-dup2'
+        success_msg: "PASS [R36.3c]: duplicate title fails with 'Found multiple records for the selection. Make sure records have a unique title or use a single UID.' and changes nothing"
+        fail_msg: "FAIL [R36.3c]: {{ ['title_duplicate', 'list1_title_duplicate', 'check_mode_duplicate'] | map('extract', r36_by_case) | map(attribute='outcome') | list }}"
+
+    - name: "Assert (d) a missing title or UID fails with the exact message and changes nothing"
+      assert:
+        that:
+          - "['title_missing', 'uid_missing'] | map('extract', r36_by_case) | map(attribute='outcome.error') | unique | list == ['ValueError: Could not find any records that meet the criteria.']"
+          - "['title_missing', 'uid_missing'] | map('extract', r36_by_case) | map(attribute='update_requests') | unique | list == [0]"
+        success_msg: "PASS [R36.3d]: missing title/UID fails with 'Could not find any records that meet the criteria.'"
+        fail_msg: "FAIL [R36.3d]: {{ ['title_missing', 'uid_missing'] | map('extract', r36_by_case) | map(attribute='outcome') | list }}"
+
+    - name: "Assert (e) two live records with one UID fail closed"
+      assert:
+        that:
+          - "['duplicate_live_uid_by_uid', 'duplicate_live_uid_by_title'] | map('extract', r36_by_case) | map(attribute='outcome.error') | unique | list == ['AnsibleError: Found multiple live records for a selected UID. A record update requires a unique target.']"
+          - "['duplicate_live_uid_by_uid', 'duplicate_live_uid_by_title'] | map('extract', r36_by_case) | map(attribute='update_requests') | unique | list == [0]"
+        success_msg: "PASS [R36.3e]: duplicate live UID fails with 'Found multiple live records for a selected UID. A record update requires a unique target.' and saves nothing"
+        fail_msg: "FAIL [R36.3e]: {{ ['duplicate_live_uid_by_uid', 'duplicate_live_uid_by_title'] | map('extract', r36_by_case) | map(attribute='outcome') | list }}"
+
+    - name: "Assert (f) check mode on a unique title predicts changed=true and sends no update"
+      assert:
+        that:
+          - r36_by_case.check_mode_unique.outcome.changed == true
+          - r36_by_case.check_mode_unique.update_requests == 0
+          - r36_by_case.check_mode_unique.notes_after.UNIQ_UID == 'old-uniq'
+        success_msg: "PASS [R36.3f]: check mode predicts changed=true and sends zero update requests"
+        fail_msg: "FAIL [R36.3f]: {{ r36_by_case.check_mode_unique }}"

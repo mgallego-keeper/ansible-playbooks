@@ -1,0 +1,83 @@
+# R17.2: keeper_verify_ssl_certs_skip rejects a non-boolean value, and the DR cache file
+# gets mode 0600 regardless of umask (KSM-1560).
+- name: "R17.2: boolean validation + DR cache file mode"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    cache_dir: "{{ r17_2_cache_dir | default('/tmp/r17_2_cache') }}"
+    fixture_title: "R17-KSM-1560 Regression Bool/Cache Fixture"
+
+  tasks:
+    - name: Create a fixture record for this regression check
+      keeper_create:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        record_type: login
+        title: "{{ fixture_title }}"
+        generate_password: true
+        fields:
+          - type: login
+            value: "r17-2@example.com"
+      register: fixture
+      no_log: true
+
+    - name: A non-boolean keeper_verify_ssl_certs_skip value fails clearly
+      keeper_get:
+        uid: "{{ fixture.record_uid }}"
+        field: login
+      vars:
+        keeper_verify_ssl_certs_skip: "maybe"
+      register: bad_bool
+      ignore_errors: true
+      no_log: true
+
+    - name: Assert the task failed naming the variable
+      assert:
+        that:
+          - bad_bool is failed
+          - "'keeper_verify_ssl_certs_skip' in bad_bool.msg"
+          - "'must be true or false' in bad_bool.msg"
+        success_msg: "PASS [R17.2]: Rejected — {{ bad_bool.msg }}"
+        fail_msg: "FAIL [R17.2]: {{ bad_bool }}"
+
+    - name: Create the DR cache directory
+      file:
+        path: "{{ cache_dir }}"
+        state: directory
+        mode: "0700"
+
+    - name: A cache-enabled read creates the DR cache file
+      keeper_get:
+        uid: "{{ fixture.record_uid }}"
+        field: login
+      vars:
+        keeper_use_cache: true
+        keeper_cache_dir: "{{ cache_dir }}"
+      no_log: true
+
+    - name: Stat the DR cache file
+      stat:
+        path: "{{ cache_dir }}/ksm_cache.bin"
+      register: cache_stat
+
+    - name: Assert the DR cache file exists with mode 0600
+      assert:
+        that:
+          - cache_stat.stat.exists == true
+          - cache_stat.stat.mode == '0600'
+        success_msg: "PASS [R17.2]: DR cache file created with mode 0600"
+        fail_msg: "FAIL [R17.2]: {{ cache_stat.stat }}"
+
+    - name: Clean up the cache directory
+      file:
+        path: "{{ cache_dir }}"
+        state: absent
+
+    - name: Clean up the fixture record
+      keeper_remove:
+        uid: "{{ fixture.record_uid }}"
+      ignore_errors: true

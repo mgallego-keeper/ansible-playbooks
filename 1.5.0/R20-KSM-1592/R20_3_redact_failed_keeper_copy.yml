@@ -1,0 +1,100 @@
+---
+# R20.3: a failing keeper_copy does not print the raw secret, in the failure message or in a
+# _secrets list, with keeper_redact active (KSM-1592, VM-3369).
+#
+# Before the fix a failed keeper_copy printed its result without a verbosity flag, and the
+# result carried the _secrets list with the raw value.
+#
+# What this does: creates five throwaway records, runs kr_inner_copy.yml as its own
+# ansible-playbook process. That playbook calls keeper_copy on each record's password field
+# (notation) with a destination directory that does not exist, so every copy fails. kr_check.py inspects the captured output at default verbosity and at -v.
+# Accepted limit, not asserted here (tracked as KSM-1636): the sha1, md5sum and size that a
+# failed copy prints. It removes the records whatever happens.
+- name: "R20.3: a failing keeper_copy does not print the raw secret"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    kr_tag: R20_3
+    kr_callback: "{{ lookup('env', 'KR_CALLBACK') | default('keeper_redact' if (surface | default('pip')) == 'pip' else 'keepersecurity.keeper_secrets_manager.keeper_redact', true) }}"
+    kr_secrets: "{{ lookup('file', playbook_dir ~ '/kr_secrets.json') | from_json }}"
+
+  tasks:
+    - name: Run the scenario and always clean up
+      block:
+        - name: Create the throwaway records
+          include_tasks: kr_records_create.yml
+
+        - name: Make a scratch directory for captured output
+          tempfile:
+            state: directory
+            suffix: ksmv_r20_3
+          register: kr_dir
+
+        - name: Run the inner playbook with failing keeper_copy tasks
+          shell: >-
+            {{ ap_path | default('/usr/local/bin/ansible-playbook' if (surface | default('pip')) in ['tower', 'awx'] else (ansible_playbook_python | dirname ~ '/ansible-playbook')) }} {{ playbook_dir }}/kr_inner_copy.yml {{ item.flag }}
+            -e {{ {'keeper_config_file': config_file, 'kr_pw_uids': kr_pw_uids, 'kr_num_uid': kr_num_uid} | to_json | quote }}
+            > {{ kr_dir.path }}/out_{{ item.name }}.txt 2>&1
+          environment:
+            ANSIBLE_STDOUT_CALLBACK: "{{ kr_callback }}"
+            ANSIBLE_NOCOLOR: "1"
+            ANSIBLE_INVENTORY_UNPARSED_FAILED: "False"
+            KSM_CONFIG_SKIP_MODE_WARNING: "TRUE"
+            OBJC_DISABLE_INITIALIZE_FORK_SAFETY: "YES"
+          loop:
+            - {name: default, flag: ""}
+            - {name: v, flag: "-v"}
+          register: kr_runs
+          changed_when: false
+          failed_when: false
+
+        - name: Assert the inner runs completed and the copies really failed
+          assert:
+            that:
+              - item.rc == 0
+            fail_msg: "FAIL [R20.3 setup]: inner playbook ({{ item.item.name }}) exited {{ item.rc }}"
+            quiet: true
+          loop: "{{ kr_runs.results }}"
+          loop_control:
+            label: "{{ item.item.name }}"
+
+        - name: Prove the copies failed (the failure text is in the output)
+          command: grep -c "nonexistent-ksmv-dir\|FAILED\|failed" {{ kr_dir.path }}/out_default.txt
+          register: kr_failed_seen
+          changed_when: false
+          failed_when: kr_failed_seen.stdout | int < 1
+
+        - name: Check each captured output for leaked secrets
+          command: >-
+            {{ ansible_playbook_python }} {{ playbook_dir }}/kr_check.py
+            {{ kr_dir.path }}/out_{{ item.name }}.txt {{ playbook_dir }}/kr_secrets.json
+          loop:
+            - {name: default}
+            - {name: v}
+          register: kr_checks
+          changed_when: false
+          failed_when: false
+
+        - name: Assert the failing keeper_copy leaked nothing
+          assert:
+            that: item.rc == 0
+            success_msg: "PASS [R20.3 {{ item.item.name }}]: {{ item.stdout_lines | join(' | ') }}"
+            fail_msg: "FAIL [R20.3 {{ item.item.name }}]: {{ item.stdout_lines | join(' | ') }}"
+          loop: "{{ kr_checks.results }}"
+          loop_control:
+            label: "{{ item.item.name }}"
+
+      always:
+        - name: Remove the throwaway records
+          include_tasks: kr_records_cleanup.yml
+
+        - name: Remove the scratch directory
+          file:
+            path: "{{ kr_dir.path }}"
+            state: absent
+          when: kr_dir is defined and kr_dir.path is defined

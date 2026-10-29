@@ -1,0 +1,86 @@
+---
+# R30.3: live keeper_create keeps false and zero in standard fields (KSM-1645).
+#
+# Before the fix, a standard field with value false or 0 was stored with an empty value array
+# although the task reported changed=True.
+#
+# What this does: keeper_create makes a throwaway pamDatabase record in shared_folder_uid with
+# the standard fields checkbox=false and text=0 (no label: the helper fills the template field
+# of that type, and a field with a label that the template does not have is not stored). The
+# record is read back with keeper_get_record and keeper_get, comparing the JSON text of each
+# value, because [0] == [false] is true in Python and would hide the bug. keeper_remove deletes the
+# record in an always: section (retried, because QA throttles), and a final keeper_get_record by
+# uid must fail.
+- name: "R30.3: live standard fields keep false and 0"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+
+  tasks:
+    - name: Fix the run id once (a vars entry that calls now() is evaluated again at each use)
+      set_fact:
+        r30_title: "KSMV-R30_3-{{ now(fmt='%Y%m%d_%H%M%S') }}"
+
+    - name: Run the scenario and always clean up
+      block:
+        - name: Create the throwaway record with false and zero standard fields
+          keeper_create:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            record_type: pamDatabase
+            title: "{{ r30_title }}"
+            fields:
+              - {type: checkbox, value: false}
+              - {type: text, value: 0}
+          register: r30_created
+
+        - name: Read the whole record back
+          keeper_get_record:
+            uid: "{{ r30_created.record_uid }}"
+          register: r30_rec
+
+        - name: Read the two fields one at a time
+          keeper_get:
+            uid: "{{ r30_created.record_uid }}"
+            field: "{{ item }}"
+          loop: [checkbox, text]
+          register: r30_single
+
+        - name: Assert the stored value arrays
+          assert:
+            that:
+              - r30_created is changed
+              - (r30_rec.record.checkbox | to_json) == '[false]'
+              - (r30_rec.record.text | to_json) == '[0]'
+              - (r30_single.results[0].value | to_json) == 'false'
+              - (r30_single.results[1].value | to_json) == '0'
+            success_msg: "PASS [R30.3 stored]: checkbox=[false] text=[0], keeper_get returns false and 0"
+            fail_msg: "FAIL [R30.3 stored]: checkbox={{ r30_rec.record.checkbox | to_json }} text={{ r30_rec.record.text | to_json }}"
+
+      always:
+        - name: Remove the throwaway record
+          keeper_remove:
+            uid: "{{ r30_created.record_uid }}"
+          register: r30_removed
+          retries: 6
+          delay: 20
+          until: r30_removed is not failed
+          when: r30_created is defined and r30_created.record_uid is defined
+          ignore_errors: true
+
+    - name: Confirm the record is gone from the vault
+      keeper_get_record:
+        uid: "{{ r30_created.record_uid }}"
+      register: r30_after
+      ignore_errors: true
+      when: r30_created is defined and r30_created.record_uid is defined
+
+    - name: Assert the vault is back where it started
+      assert:
+        that: r30_after is failed
+        success_msg: "PASS [R30.3 cleanup]: keeper_get_record on the removed record fails, the vault is back to baseline"
+        fail_msg: "FAIL [R30.3 cleanup]: the removed record can still be read"

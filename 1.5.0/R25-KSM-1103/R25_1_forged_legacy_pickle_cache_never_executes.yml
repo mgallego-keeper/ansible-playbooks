@@ -1,0 +1,132 @@
+---
+# R25.1: a forged legacy pickle-format cache is rejected without deserialization — the
+# task does NOT fail, it falls through cleanly to a live vault read (KSM-1103 / VM-1452).
+#
+# The forged cache is built in-line by this playbook (not read from an external fixture
+# file) so this regression case is fully self-contained and does not depend on any
+# scratch files left over from manual testing. The exploit's __reduce__ would create a
+# proof file if pickle.loads ever ran on it; this case asserts that file is never created.
+- name: "R25.1: forged legacy pickle cache is rejected cleanly, no deserialization, falls through to vault"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    proof_path: "/tmp/r25_1_pwned_proof.txt"
+    forge_script: "/tmp/r25_1_forge_legacy_cache.py"
+    forged_cache_path: "/tmp/r25_1_forged_cache.token"
+    cache_secret: "r14-2-forged-cache-secret"
+
+  tasks:
+    - name: Ensure no stale proof-file artifact exists before this run
+      file:
+        path: "{{ proof_path }}"
+        state: absent
+
+    - name: Create a throwaway record to be read via the vault fallback path
+      keeper_create:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        record_type: login
+        title: "R25.1 Test Record - {{ now(fmt='%Y%m%d_%H%M%S') }}"
+        fields:
+          - type: login
+            value: "r25_1_user"
+      register: created
+      no_log: true
+
+    - name: Wait for propagation
+      pause:
+        seconds: 3
+
+    - name: Write the forging script
+      copy:
+        dest: "{{ forge_script }}"
+        mode: "0600"
+        content: |
+          import base64, pickle, io, socket, sys
+          from cryptography.fernet import Fernet
+          from cryptography.hazmat.primitives import hashes
+          from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
+          cache_secret = sys.argv[1]
+          proof_path = sys.argv[2]
+          out_path = sys.argv[3]
+
+          # Same derivation as KeeperAnsible.get_encryption_key():
+          #   salt = socket.gethostname().zfill(32)[0:32]
+          #   PBKDF2HMAC(SHA256, length=32, salt=salt.encode(), iterations=390000)
+          hostname = socket.gethostname()
+          salt = hostname.zfill(32)[0:32]
+          kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt.encode(), iterations=390000)
+          key = base64.urlsafe_b64encode(kdf.derive(cache_secret.encode()))
+
+          class Exploit:
+              def __reduce__(self):
+                  return (open, (proof_path, "w"))
+
+          buf = io.BytesIO()
+          pickle.dump(Exploit(), buf)
+          token = Fernet(key).encrypt(buf.getvalue())
+
+          with open(out_path, "wb") as f:
+              f.write(token)
+
+    - name: Store the SAME cache secret the forging script used
+      set_fact:
+        keeper_record_cache_secret: "{{ cache_secret }}"
+      no_log: true
+
+    - name: Run the forging script to build the malicious legacy-format cache
+      command: "{{ ansible_playbook_python }} {{ forge_script }} {{ cache_secret }} {{ proof_path }} {{ forged_cache_path }}"
+      changed_when: false
+
+    - name: Read the forged cache token from disk
+      slurp:
+        src: "{{ forged_cache_path }}"
+      register: forged_cache_raw
+
+    - name: Feed the forged legacy pickle cache to keeper_get via the cache parameter
+      keeper_get:
+        cache: "{{ forged_cache_raw.content | b64decode }}"
+        uid: "{{ created.record_uid }}"
+        field: login
+      register: result
+      no_log: true
+
+    - name: Assert the task did NOT fail and fell through to a correct live vault read
+      assert:
+        that:
+          - result is not failed
+          - result.value == "r25_1_user"
+        success_msg: "PASS [R25.1]: forged legacy pickle cache was rejected cleanly and fell through to a correct live vault read"
+        fail_msg: "FAIL [R25.1]: forged legacy cache handling did not fall through correctly — got {{ result }}"
+
+    - name: Assert the pickle exploit's proof file was NEVER created
+      stat:
+        path: "{{ proof_path }}"
+      register: proof_check
+
+    - name: Assert no code execution occurred
+      assert:
+        that:
+          - not proof_check.stat.exists
+        success_msg: "PASS [R25.1]: no proof-of-execution artifact exists — pickle.loads was never called on the forged cache"
+        fail_msg: "FAIL [R25.1]: proof-of-execution artifact exists — the forged pickle payload EXECUTED"
+
+    - name: Cleanup scratch files
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ forge_script }}"
+        - "{{ forged_cache_path }}"
+        - "{{ proof_path }}"
+
+    - name: Cleanup test record
+      keeper_remove:
+        uid: "{{ created.record_uid }}"
+      ignore_errors: yes
+      no_log: true

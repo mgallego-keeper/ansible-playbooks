@@ -1,0 +1,94 @@
+---
+# R22.2: the warning that keeper_set and keeper_remove print when a task passes "cache" is really
+# shown, names the right plugin, and is not printed when cache is omitted (KSM-1613). This is the
+# check that fails if the warning is removed or made unconditional.
+#
+# Each case runs the helper playbook wc_inner_cache_warning.yml with ansible-playbook and reads its
+# output, because a task cannot see its own display.warning() text.
+- name: "R22.2: the cache-ignored warning appears only when cache is set"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+
+  tasks:
+    - name: Fix a tag for this run
+      set_fact:
+        run_tag: "{{ now(fmt='%Y%m%d_%H%M%S') }}"
+
+    - name: Create four throwaway records (a set and a remove target for each case)
+      keeper_create:
+        shared_folder_uid: "{{ shared_folder_uid }}"
+        record_type: login
+        title: "R22.2 {{ item }} - {{ run_tag }}"
+        fields:
+          - type: login
+            value: "r22-2-original"
+      loop:
+        - with-cache set target
+        - with-cache remove target
+        - control set target
+        - control remove target
+      register: made
+      no_log: true
+
+    - name: Run the checks, then clean up
+      block:
+        - name: Run keeper_set and keeper_remove WITH cache=
+          command: >
+            {{ ap_path | default('/usr/local/bin/ansible-playbook' if (surface | default('pip')) in ['tower', 'awx'] else (ansible_playbook_python | dirname ~ '/ansible-playbook')) }} {{ playbook_dir }}/wc_inner_cache_warning.yml
+            -e config_file={{ config_file | quote }}
+            -e set_uid={{ made.results[0].record_uid }} -e remove_uid={{ made.results[1].record_uid }}
+            -e use_cache=true
+          environment:
+            ANSIBLE_INVENTORY_UNPARSED_FAILED: "False"
+            ANSIBLE_NOCOLOR: "1"
+          register: with_cache
+          changed_when: false
+
+        - name: Run keeper_set and keeper_remove WITHOUT cache=
+          command: >
+            {{ ap_path | default('/usr/local/bin/ansible-playbook' if (surface | default('pip')) in ['tower', 'awx'] else (ansible_playbook_python | dirname ~ '/ansible-playbook')) }} {{ playbook_dir }}/wc_inner_cache_warning.yml
+            -e config_file={{ config_file | quote }}
+            -e set_uid={{ made.results[2].record_uid }} -e remove_uid={{ made.results[3].record_uid }}
+            -e use_cache=false
+          environment:
+            ANSIBLE_INVENTORY_UNPARSED_FAILED: "False"
+            ANSIBLE_NOCOLOR: "1"
+          register: without_cache
+          changed_when: false
+
+        - name: Assert both runs succeeded (the option must not break the tasks)
+          assert:
+            that:
+              - with_cache.rc == 0
+              - without_cache.rc == 0
+            success_msg: "PASS [R22.2]: both runs completed"
+            fail_msg: "FAIL [R22.2]: an inner run failed -- {{ (with_cache.rc != 0) | ternary(with_cache.stdout_lines[-5:], without_cache.stdout_lines[-5:]) }}"
+
+        - name: Assert the warning is shown for keeper_set and for keeper_remove when cache is set
+          assert:
+            that:
+              - "'The cache option of keeper_set has no effect' in (with_cache.stdout + with_cache.stderr)"
+              - "'The cache option of keeper_remove has no effect' in (with_cache.stdout + with_cache.stderr)"
+            success_msg: "PASS [R22.2]: the warning is printed for keeper_set and for keeper_remove"
+            fail_msg: "FAIL [R22.2]: the cache-ignored warning is missing from the output when cache= is set"
+
+        - name: Assert no warning is printed when cache is omitted
+          assert:
+            that:
+              - "'has no effect' not in (without_cache.stdout + without_cache.stderr)"
+            success_msg: "PASS [R22.2]: no warning is printed when cache is omitted"
+            fail_msg: "FAIL [R22.2]: a cache-ignored warning was printed although cache was not set"
+
+      always:
+        - name: Remove whatever throwaway records still exist
+          keeper_remove:
+            uid: "{{ item.record_uid }}"
+          loop: "{{ made.results }}"
+          ignore_errors: yes
+          no_log: true

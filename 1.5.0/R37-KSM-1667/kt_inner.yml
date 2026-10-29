@@ -1,0 +1,107 @@
+---
+# Inner playbook for R29 (KSM-1667). Not a test by itself (the runner skips it). The outer playbook runs it as its own
+# ansible-playbook process with keeper_redact as the stdout callback and -v, captures the console output, and has
+# kt_check.py look at it.
+# Expects -e: kt_uid (record UID), kt_dir (scratch dir), kt_pace (seconds between vault calls), plus keeper_config_file.
+# The record holds: password = a single-line secret, custom field "pem_lf" = a fake PEM key with LF line ends and a trailing
+# newline, custom field "pem_crlf" = a fake PEM key with CRLF line ends and a trailing CRLF.
+# Tasks named T.. must be fully masked (or, for T2x, left alone). Tasks named OBS.. only OBSERVE what the callback does with
+# partial output; the checker does not assert on them (they come after the last T.. task).
+- name: "KSM-1667 inner: print multiline secrets in every shape"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
+
+  tasks:
+    - name: T00 keeper_get the single-line password
+      keeper_get:
+        uid: "{{ kt_uid }}"
+        field: password
+      register: kt_single
+    - name: Pace 1
+      pause: {seconds: "{{ kt_pace }}"}
+      when: kt_pace | int > 0
+    - name: T01 keeper_get the LF key
+      keeper_get:
+        uid: "{{ kt_uid }}"
+        custom_field: pem_lf
+      register: kt_lf
+    - name: Pace 2
+      pause: {seconds: "{{ kt_pace }}"}
+      when: kt_pace | int > 0
+    - name: T02 keeper_get the CRLF key
+      keeper_get:
+        uid: "{{ kt_uid }}"
+        custom_field: pem_crlf
+      register: kt_crlf
+
+    - name: T03 write the as-returned values to files (read-back proof, no_log)
+      copy:
+        content: "{{ item.value }}"
+        dest: "{{ kt_dir }}/{{ item.name }}"
+        mode: "0600"
+      no_log: true
+      loop:
+        - {name: lf.pem, value: "{{ kt_lf.value }}"}
+        - {name: crlf.pem, value: "{{ kt_crlf.value }}"}
+        - {name: single.txt, value: "{{ kt_single.value }}"}
+
+    - name: T10 debug msg is the multiline LF key
+      debug:
+        msg: "{{ kt_lf.value }}"
+    - name: T11 debug msg is a list of the LF key lines
+      debug:
+        msg: "{{ kt_lf.value.splitlines() }}"
+    - name: T12 debug var of the registered LF result
+      debug:
+        var: kt_lf
+    - name: T13 debug msg is the multiline CRLF key
+      debug:
+        msg: "{{ kt_crlf.value }}"
+    - name: T14 debug msg is the CRLF key split on LF
+      debug:
+        msg: "{{ kt_crlf.value.split('\n') }}"
+    - name: T15 command cat of the LF key file
+      command: cat {{ kt_dir }}/lf.pem
+      register: kt_cat_lf
+      changed_when: false
+    - name: T16 command cat of the CRLF key file
+      command: cat {{ kt_dir }}/crlf.pem
+      register: kt_cat_crlf
+      changed_when: false
+    - name: T17 shell output mixes public lines and the LF key
+      shell: "echo public-before-1667; cat {{ kt_dir }}/lf.pem; echo public-after-1667"
+      register: kt_mix
+      changed_when: false
+    - name: T18 shell prints the CRLF key on stderr
+      shell: "cat {{ kt_dir }}/crlf.pem >&2"
+      register: kt_err
+      changed_when: false
+    - name: T19 debug var of the stdout_lines of the cat
+      debug:
+        var: kt_cat_lf.stdout_lines
+    - name: T20 debug msg is the single-line secret
+      debug:
+        msg: "single is {{ kt_single.value }}"
+
+    - name: T21 debug msg is public multiline text (must stay readable)
+      debug:
+        msg: "public-alpha-1667\n-----BEGIN CERTIFICATE-----\npublic-gamma-1667\n-----END CERTIFICATE-----"
+    - name: T22 command prints public lines (must stay readable)
+      shell: "printf 'public-one-1667\\npublic-two-1667\\n-----BEGIN CERTIFICATE-----\\n'"
+      register: kt_pub
+      changed_when: false
+
+    - name: OBS1 debug one body line of the LF key on its own
+      debug:
+        msg: "{{ kt_lf.value.splitlines()[1] }}"
+    - name: OBS2 command prints only the first two lines of the LF key
+      shell: "head -2 {{ kt_dir }}/lf.pem"
+      register: kt_head
+      changed_when: false
+    - name: OBS3 command prints the key base64-encoded
+      shell: "base64 < {{ kt_dir }}/lf.pem | tr -d '\\n'"
+      register: kt_b64
+      changed_when: false

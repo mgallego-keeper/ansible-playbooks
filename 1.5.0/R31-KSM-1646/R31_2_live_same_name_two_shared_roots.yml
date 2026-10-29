@@ -1,0 +1,151 @@
+---
+# R31.2: live, the same folder name under two shared roots gives two folders (KSM-1646).
+#
+# Before the fix, an idempotency lookup that is not tied to the named shared root could return a
+# folder of another root. After the fix, the same name under a different shared root must create
+# its own folder, and a repeat under the same root must return the same folder with changed=false.
+#
+# What this does: keeper_create_folder makes "K1646-A-<run id>" directly in shared_folder_uid and
+# the same name directly in second_shared_folder_uid. It asserts the two UIDs differ, that each
+# folder is found under its own root by keeper_get_folder, that a repeat in each root returns the
+# same UID with changed=false, and that check mode predicts changed=false with the existing UID for
+# a present name and changed=true with a null UID for an absent name (and creates nothing).
+# The playbook skips when second_shared_folder_uid is not set. Both roots must be writable.
+# keeper_delete_folder removes only the two folders this run created, by exact UID, in an always:
+# section (retried, because QA throttles); a final lookup of each name must fail.
+- name: "R31.2: same name under two shared roots"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+
+  tasks:
+    - name: Skip when no second shared root is given
+      meta: end_play
+      when: second_shared_folder_uid | default('') | length == 0
+
+    - name: Fix the run id and names once
+      set_fact:
+        r31_name: "K1646-A-{{ now(fmt='%Y%m%d%H%M%S') }}"
+        r31_absent: "K1646-ABSENT-{{ now(fmt='%Y%m%d%H%M%S') }}"
+
+    - name: Run the scenario and always clean up
+      block:
+        - name: Create the folder in root 1
+          keeper_create_folder:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            folder_name: "{{ r31_name }}"
+          register: r31_c1
+
+        - name: Pause for the QA throttle
+          pause: {seconds: 5}
+
+        - name: Create the same name in root 2
+          keeper_create_folder:
+            shared_folder_uid: "{{ second_shared_folder_uid }}"
+            folder_name: "{{ r31_name }}"
+          register: r31_c2
+
+        - name: Assert two different new folders
+          assert:
+            that:
+              - r31_c1 is changed
+              - r31_c2 is changed
+              - r31_c1.folder_uid | length > 0
+              - r31_c2.folder_uid | length > 0
+              - r31_c1.folder_uid != r31_c2.folder_uid
+            success_msg: "PASS [R31.2 create]: root1={{ r31_c1.folder_uid }} root2={{ r31_c2.folder_uid }} are different, both changed=true"
+            fail_msg: "FAIL [R31.2 create]: root1={{ r31_c1 }} root2={{ r31_c2 }}"
+
+        - name: Find the folder under each root by name
+          keeper_get_folder:
+            shared_folder_uid: "{{ item }}"
+            folder_name: "{{ r31_name }}"
+          loop: ["{{ shared_folder_uid }}", "{{ second_shared_folder_uid }}"]
+          register: r31_g
+
+        - name: Assert each root holds its own folder
+          assert:
+            that:
+              - r31_g.results[0].folder_uid == r31_c1.folder_uid
+              - r31_g.results[1].folder_uid == r31_c2.folder_uid
+            success_msg: "PASS [R31.2 readback]: each root returns its own folder UID"
+            fail_msg: "FAIL [R31.2 readback]: {{ r31_g.results | map(attribute='folder_uid') | list }}"
+
+        - name: Pause for the QA throttle
+          pause: {seconds: 5}
+
+        - name: Repeat the create in each root
+          keeper_create_folder:
+            shared_folder_uid: "{{ item }}"
+            folder_name: "{{ r31_name }}"
+          loop: ["{{ shared_folder_uid }}", "{{ second_shared_folder_uid }}"]
+          register: r31_rep
+
+        - name: Assert idempotency per root
+          assert:
+            that:
+              - r31_rep.results[0] is not changed
+              - r31_rep.results[1] is not changed
+              - r31_rep.results[0].folder_uid == r31_c1.folder_uid
+              - r31_rep.results[1].folder_uid == r31_c2.folder_uid
+            success_msg: "PASS [R31.2 idempotent]: repeat returns the same UID with changed=false in both roots"
+            fail_msg: "FAIL [R31.2 idempotent]: {{ r31_rep.results | map(attribute='folder_uid') | list }}"
+
+        - name: Check mode for a present name and an absent name
+          keeper_create_folder:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            folder_name: "{{ item }}"
+          loop: ["{{ r31_name }}", "{{ r31_absent }}"]
+          check_mode: true
+          register: r31_chk
+
+        - name: Look for the absent name after check mode
+          keeper_get_folder:
+            shared_folder_uid: "{{ shared_folder_uid }}"
+            folder_name: "{{ r31_absent }}"
+          register: r31_chk_after
+          ignore_errors: true
+
+        - name: Assert check mode predicts and creates nothing
+          assert:
+            that:
+              - r31_chk.results[0] is not changed
+              - r31_chk.results[0].folder_uid == r31_c1.folder_uid
+              - r31_chk.results[1] is changed
+              - r31_chk.results[1].folder_uid is none
+              - r31_chk_after is failed
+            success_msg: "PASS [R31.2 check_mode]: present name changed=false with the existing UID, absent name changed=true with a null UID, nothing created"
+            fail_msg: "FAIL [R31.2 check_mode]: {{ r31_chk.results }} after={{ r31_chk_after }}"
+
+      always:
+        - name: Remove only the folders this run created, by exact UID
+          keeper_delete_folder:
+            folder_uid: "{{ item }}"
+            force_deletion: true
+          loop: "{{ [r31_c1 | default({}), r31_c2 | default({})] | map(attribute='folder_uid', default='') | select | list }}"
+          register: r31_del
+          retries: 6
+          delay: 20
+          until: r31_del is not failed
+          ignore_errors: true
+
+    - name: Confirm both names are gone from both roots
+      keeper_get_folder:
+        shared_folder_uid: "{{ item }}"
+        folder_name: "{{ r31_name }}"
+      loop: ["{{ shared_folder_uid }}", "{{ second_shared_folder_uid }}"]
+      register: r31_after
+      ignore_errors: true
+
+    - name: Assert the vault is back where it started
+      assert:
+        that:
+          - r31_after.results[0] is failed
+          - r31_after.results[1] is failed
+        success_msg: "PASS [R31.2 cleanup]: neither root still has {{ r31_name }}"
+        fail_msg: "FAIL [R31.2 cleanup]: a test folder is still present"

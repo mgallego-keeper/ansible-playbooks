@@ -1,0 +1,85 @@
+---
+# R20.2: a LATER debug task that prints a registered keeper_get result, or a value taken from
+# it, is masked by keeper_redact once keeper_get has fetched the secret (KSM-1592).
+#
+# Before the fix a later `debug var=<registered>` printed the value and the _secrets list,
+# because the callback masked only the result of the keeper_get task itself and removed
+# _secrets only from the copy it printed.
+#
+# The callback learns a secret when keeper_get returns it, and hides secrets of 4 or more
+# characters in later output of the same run. Accepted limit (not tested here): secrets of
+# 3 characters or fewer are hidden only in the keeper_get result itself.
+#
+# What this does: creates five throwaway records (plain, `pa"ss\word`, multiline fake PEM,
+# `pässwörd-日本`, numeric field), runs kr_inner_debug.yml as its own ansible-playbook process
+# with keeper_redact as the stdout callback, and runs kr_check.py on the captured output.
+# It removes the records whatever happens. Override the callback name with KR_CALLBACK.
+- name: "R20.2: keeper_redact masks a later debug of a registered keeper_get result"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
+
+  vars:
+    keeper_config_file: "{{ config_file }}"
+    kr_tag: R20_2
+    kr_callback: "{{ lookup('env', 'KR_CALLBACK') | default('keeper_redact' if (surface | default('pip')) == 'pip' else 'keepersecurity.keeper_secrets_manager.keeper_redact', true) }}"
+    kr_secrets: "{{ lookup('file', playbook_dir ~ '/kr_secrets.json') | from_json }}"
+
+  tasks:
+    - name: Run the scenario and always clean up
+      block:
+        - name: Create the throwaway records
+          include_tasks: kr_records_create.yml
+
+        - name: Make a scratch directory for captured output
+          tempfile:
+            state: directory
+            suffix: ksmv_r20_2
+          register: kr_dir
+
+        - name: Run the inner playbook with keeper_redact as the stdout callback
+          shell: >-
+            {{ ap_path | default('/usr/local/bin/ansible-playbook' if (surface | default('pip')) in ['tower', 'awx'] else (ansible_playbook_python | dirname ~ '/ansible-playbook')) }} {{ playbook_dir }}/kr_inner_debug.yml
+            -e {{ {'keeper_config_file': config_file, 'kr_pw_uids': kr_pw_uids, 'kr_num_uid': kr_num_uid} | to_json | quote }}
+            > {{ kr_dir.path }}/out.txt 2>&1
+          environment:
+            ANSIBLE_STDOUT_CALLBACK: "{{ kr_callback }}"
+            ANSIBLE_NOCOLOR: "1"
+            ANSIBLE_INVENTORY_UNPARSED_FAILED: "False"
+            KSM_CONFIG_SKIP_MODE_WARNING: "TRUE"
+            OBJC_DISABLE_INITIALIZE_FORK_SAFETY: "YES"
+          register: kr_run
+          changed_when: false
+          failed_when: false
+
+        - name: Assert the inner run completed
+          assert:
+            that: kr_run.rc == 0
+            fail_msg: "FAIL [R20.2 setup]: inner playbook exited {{ kr_run.rc }}"
+            quiet: true
+
+        - name: Check the captured output for leaked secrets
+          command: >-
+            {{ ansible_playbook_python }} {{ playbook_dir }}/kr_check.py
+            {{ kr_dir.path }}/out.txt {{ playbook_dir }}/kr_secrets.json --expect-marker
+          register: kr_check
+          changed_when: false
+          failed_when: false
+
+        - name: Assert the later debug tasks leaked nothing
+          assert:
+            that: kr_check.rc == 0
+            success_msg: "PASS [R20.2]: {{ kr_check.stdout_lines | join(' | ') }}"
+            fail_msg: "FAIL [R20.2]: {{ kr_check.stdout_lines | join(' | ') }}"
+
+      always:
+        - name: Remove the throwaway records
+          include_tasks: kr_records_cleanup.yml
+
+        - name: Remove the scratch directory
+          file:
+            path: "{{ kr_dir.path }}"
+            state: absent
+          when: kr_dir is defined and kr_dir.path is defined

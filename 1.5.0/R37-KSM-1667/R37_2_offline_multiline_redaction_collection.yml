@@ -1,0 +1,104 @@
+---
+# R37.2: keeper_redact hides multiline secrets in every printed shape, Galaxy collection, OFFLINE (KSM-1667).
+#
+# Offline companion of R37.1. Nothing is created in any vault and nothing touches the network. kt_mock/sitecustomize.py gives the
+# Secrets Manager SDK a mock response queue as its post function (the SDK's own test double), so the real keeper_get plugin,
+# KeeperAnsible, the SDK crypto and the real keeper_redact callback all run inside a real ansible-playbook process (kt_inner.yml).
+# The mock record holds a single-line password and two fake PEM keys (custom fields), one with LF and one with CRLF line ends.
+#
+# Before the fix (KSM-1667) a key that was read with keeper_get was masked as one string, but the same key printed as stdout_lines,
+# a list of lines, or a command output with its trailing newline trimmed showed every line in the clear. After the fix a run of
+# lines that equals a learned key is masked, in the msg string, the list, stdout, stdout_lines, stderr_lines and a debug var, for LF
+# and CRLF keys; single-line secrets stay masked, and public text, even with "-----BEGIN CERTIFICATE-----" lines, is untouched.
+# Expected to FAIL several cases against code built before the fix (run with -e strict=false to print the table and not fail the play).
+#
+# Run with the interpreter that has ansible and keeper_secrets_manager_core, ANSIBLE_COLLECTIONS_PATH = the directory that holds the
+# installed keepersecurity.keeper_secrets_manager collection under test, and an ansible.cfg without plugin paths.
+# Extra var: strict (default true; false prints the table and does not fail the play). KT_KEEP=<path> saves the console output.
+- name: "R37.2: multiline secrets are masked in every shape (offline, Galaxy collection)"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    strict: true
+    kt_callback: "{{ lookup('env', 'KR_CALLBACK') | default(('keeper_redact' if (surface | default('pip')) == 'pip' else 'keepersecurity.keeper_secrets_manager.keeper_redact'), true) }}"
+    py: "{{ ansible_playbook_python }}"
+    ap_dir: "{{ ansible_playbook_python | dirname }}"
+
+  tasks:
+    - name: Make a scratch directory
+      tempfile: {state: directory, suffix: ksmv_r29_2}
+      register: kt_dir
+
+    - name: Run the scenario and always clean up
+      block:
+        - name: Generate the secrets
+          command: "{{ py }} {{ playbook_dir }}/kt_make_secrets.py {{ kt_dir.path }}/secrets.json"
+          changed_when: false
+          no_log: true
+
+        - name: Build the mock config and record
+          command: "{{ py }} {{ playbook_dir }}/kt_mock_setup.py {{ kt_dir.path }}/secrets.json {{ kt_dir.path }}"
+          register: kt_setup
+          changed_when: false
+          no_log: true
+
+        - name: Prove which callback file loads (ansible-doc, no vault, no secret)
+          shell: >-
+            {{ ap_dir }}/ansible-doc -t callback -j {{ kt_callback }} | {{ py }} -c
+            "import sys,json; d=json.load(sys.stdin); k=list(d)[0]; print(d[k]['doc']['filename'])"
+          register: kt_which
+          changed_when: false
+
+        - name: Run the inner playbook with keeper_redact as stdout callback and -v
+          shell: >-
+            {{ ap_dir }}/ansible-playbook {{ playbook_dir }}/kt_inner.yml -v
+            -e keeper_config_file={{ kt_dir.path }}/config.json -e kt_uid={{ kt_setup.stdout | trim }} -e kt_dir={{ kt_dir.path }} -e kt_pace=0
+            > {{ kt_dir.path }}/out.txt 2>&1
+          environment:
+            ANSIBLE_STDOUT_CALLBACK: "{{ kt_callback }}"
+            ANSIBLE_NOCOLOR: "1"
+            KSM_CONFIG_SKIP_MODE_WARNING: "TRUE"
+            OBJC_DISABLE_INITIALIZE_FORK_SAFETY: "YES"
+            no_proxy: "*"
+            KT_MOCK_SPEC: "{{ kt_dir.path }}/spec.json"
+            PYTHONPATH: "{{ playbook_dir }}/kt_mock:{{ lookup('env', 'PYTHONPATH') }}"
+          changed_when: false
+          failed_when: false
+
+        - name: Check the captured output
+          command: "{{ py }} {{ playbook_dir }}/kt_check.py {{ kt_dir.path }}/out.txt {{ kt_dir.path }}/secrets.json {{ kt_dir.path }}"
+          register: kt_check
+          changed_when: false
+          failed_when: false
+
+        - name: Keep a copy of the console output for evidence when KT_KEEP is set
+          copy: {src: "{{ kt_dir.path }}/out.txt", dest: "{{ lookup('env', 'KT_KEEP') }}", remote_src: true}
+          when: lookup('env', 'KT_KEEP') | length > 0
+
+        - name: Assert the callback under test is the Galaxy collection, not a source tree
+          assert:
+            that:
+              - kt_which.stdout is search('keeper_redact.py$')
+              - kt_which.stdout is search('ansible_collections/keepersecurity/keeper_secrets_manager/plugins/callback/keeper_redact.py$')
+            success_msg: "PASS [R37.2-src]: callback file is {{ kt_which.stdout }}"
+            fail_msg: "FAIL [R37.2-src]: wrong code under test: {{ kt_which.stdout }}"
+
+        - name: Parse the result
+          set_fact:
+            kt_data: "{{ kt_check.stdout | from_json }}"
+
+        - name: Show the code under test and the table
+          debug:
+            msg: "{{ ['callback loaded from: ' ~ (kt_which.stdout | default('?'))] + (kt_data.cases | map(attribute='result') | zip(kt_data.cases | map(attribute='case'), kt_data.cases | map(attribute='detail')) | map('join', ' | ') | list) + ['OBSERVATIONS (not asserted): ' ~ (kt_data.observations | to_json)] }}"
+
+        - name: Assert every case passed
+          assert:
+            that: kt_data.fails | int == 0
+            success_msg: "PASS [R37.2]: all {{ kt_data.cases | length }} cases passed"
+            fail_msg: "FAIL [R37.2]: {{ kt_data.fails }} of {{ kt_data.cases | length }} cases failed"
+          when: strict | bool
+      always:
+        - name: Remove the scratch directory (holds the throw-away secrets)
+          file: {path: "{{ kt_dir.path }}", state: absent}
