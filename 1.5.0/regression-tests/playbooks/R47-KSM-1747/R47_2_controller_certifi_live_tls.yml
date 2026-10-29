@@ -5,9 +5,10 @@
   hosts: localhost
   connection: local
   gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
 
   vars:
-    keeper_config_file: "{{ config_file }}"
     keeper_use_cache: false
 
   tasks:
