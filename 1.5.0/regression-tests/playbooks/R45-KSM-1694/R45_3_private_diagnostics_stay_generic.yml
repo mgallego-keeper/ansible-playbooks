@@ -6,9 +6,10 @@
   hosts: localhost
   connection: local
   gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
 
   vars:
-    keeper_config_file: "{{ config_file }}"
     generic_msg: "The folder operation failed. Diagnostic details are hidden because no_log is enabled."
 
   tasks:

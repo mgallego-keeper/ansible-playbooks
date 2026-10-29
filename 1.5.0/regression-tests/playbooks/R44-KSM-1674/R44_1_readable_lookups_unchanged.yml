@@ -15,7 +15,6 @@
     - keepersecurity.keeper_secrets_manager
 
   vars:
-    keeper_config_file: "{{ config_file }}"
     res: "{{ shared_folder_uid }}"
     root_name: "KSM-1445 Root Folder Test"
     nested_name: "KSM-1445 Nested Folder Test"

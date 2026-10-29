@@ -6,9 +6,10 @@
   hosts: localhost
   connection: local
   gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
 
   vars:
-    keeper_config_file: "{{ config_file }}"
     migration_msg: "The folder_uid parameter for keeper_create has been renamed to subfolder_uid. Please update your playbook."
 
   tasks:

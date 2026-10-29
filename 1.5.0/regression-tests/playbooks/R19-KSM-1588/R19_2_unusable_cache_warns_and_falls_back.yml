@@ -6,9 +6,10 @@
   hosts: localhost
   connection: local
   gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
 
   vars:
-    keeper_config_file: "{{ config_file }}"
     keeper_record_cache_secret: "R19-regression-test-secret-do-not-reuse-9d4e1b7a3c5f6082"
 
   tasks:

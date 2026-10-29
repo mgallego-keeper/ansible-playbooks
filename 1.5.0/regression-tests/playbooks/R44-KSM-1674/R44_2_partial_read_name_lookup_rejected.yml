@@ -16,7 +16,6 @@
     - keepersecurity.keeper_secrets_manager
 
   vars:
-    keeper_config_file: "{{ config_file }}"
     root_name: "KSM-1445 Root Folder Test"
     nested_name: "KSM-1445 Nested Folder Test"
     databases_name: "KSM-1478 Databases"
@@ -44,13 +43,35 @@
     - name: Check the seeded folder tree
       include_tasks: r44_preconditions.yml
 
+    # The AAP credential injects keeper_config (base64) and no file, but the probe script needs a config file.
     - name: Run the simulated partial-read lookups
-      command:
-        argv: ["{{ ansible_playbook_python }}", "{{ playbook_dir }}/R44_probe.py", "{{ config_file }}", "{{ probe_args | to_json }}"]
-      environment:
-        KSM_CONFIG_SKIP_MODE_WARNING: "TRUE"
-      register: probe
-      changed_when: false
+      block:
+        - name: Create temp file for the decoded KSM config
+          tempfile:
+            state: file
+            suffix: .json
+          register: probe_config
+
+        - name: Write decoded KSM config to the temp file
+          copy:
+            content: "{{ keeper_config | b64decode }}"
+            dest: "{{ probe_config.path }}"
+            mode: "0600"
+          no_log: true
+
+        - name: Run the probe
+          command:
+            argv: ["{{ ansible_playbook_python }}", "{{ playbook_dir }}/R44_probe.py", "{{ probe_config.path }}", "{{ probe_args | to_json }}"]
+          environment:
+            KSM_CONFIG_SKIP_MODE_WARNING: "TRUE"
+          register: probe
+          changed_when: false
+      always:
+        - name: Remove temp KSM config file
+          file:
+            path: "{{ probe_config.path }}"
+            state: absent
+          when: probe_config.path is defined
 
     - name: Parse the result
       set_fact:

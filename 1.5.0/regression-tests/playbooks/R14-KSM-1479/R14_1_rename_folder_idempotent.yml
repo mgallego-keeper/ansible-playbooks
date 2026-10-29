@@ -4,9 +4,10 @@
   hosts: localhost
   connection: local
   gather_facts: false
+  collections:
+    - keepersecurity.keeper_secrets_manager
 
   vars:
-    keeper_config_file: "{{ config_file }}"
     original_name: "R14-KSM-1479 Regression Folder"
     renamed_name: "R14-KSM-1479 Regression Folder (Renamed)"
 

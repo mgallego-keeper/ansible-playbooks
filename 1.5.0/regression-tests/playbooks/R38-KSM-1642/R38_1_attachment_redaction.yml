@@ -9,8 +9,8 @@
   hosts: localhost
   connection: local
   gather_facts: false
-  vars:
-    keeper_config_file: "{{ config_file }}"
+  collections:
+    - keepersecurity.keeper_secrets_manager
   tasks:
     - name: Get attachment by file=
       keeper_get:

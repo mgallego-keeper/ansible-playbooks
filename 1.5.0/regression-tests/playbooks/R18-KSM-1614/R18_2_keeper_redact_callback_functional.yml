@@ -5,9 +5,8 @@
   hosts: localhost
   connection: local
   gather_facts: false
-
-  vars:
-    keeper_config_file: "{{ config_file }}"
+  collections:
+    - keepersecurity.keeper_secrets_manager
 
   tasks:
     - name: Get login field by UID with keeper_redact as the active stdout callback
