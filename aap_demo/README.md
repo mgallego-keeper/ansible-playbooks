@@ -2,9 +2,10 @@
 
 This guide is for Mateo's hands-on demo with Austin and Victoria. It covers
 end-to-end testing of the Ansible v1.5.0 release on Ansible Automation Platform
-(AAP), using dedicated QA vaults and verbose job output. The goal is to verify
-real vault changes, diagnose expected failures, and inspect sensitive-data
-exposure rather than treating a successful job as sufficient evidence.
+(AAP). The jobs use a dedicated test shared folder in Keeper PROD and the most
+verbose job output. The goal is to verify real vault changes, diagnose expected
+failures, and inspect sensitive-data exposure rather than treating a successful
+job as sufficient evidence.
 
 The existing repository examples are unchanged. This directory contains a
 separate, repeatable demo suite.
@@ -24,12 +25,18 @@ revision. Record the image digest and confirm the build includes the intended
 PR revision. The public docs provide setup guidance, but the PR's module
 documentation is the reference for the new folder interfaces.
 
-## Prepare the QA vault
+## Prepare the test vault in PROD
 
-1. Choose a dedicated QA shared folder and give the QA KSM application the
-   permissions needed for record and folder CRUD.
-2. Initialize a reusable Base64 KSM configuration for that application. Do not
-   reuse a one-time initialization token as the normal job credential.
+**Important:** Use a PROD KSM configuration for every AAP job. The cloud-hosted
+AAP instance from the Red Hat Developer Sandbox cannot connect to the Keeper QA
+environment. A KSM task with a QA configuration fails.
+
+1. In Keeper PROD, choose a dedicated test shared folder that holds only test
+   data. Give the test KSM application the permissions needed for record and
+   folder CRUD.
+2. Initialize a reusable Base64 KSM configuration for that application in PROD,
+   for example PROD US. Do not reuse a one-time initialization token as the
+   normal job credential.
 3. Record the top-level shared-folder UID. It is not a subfolder UID.
 4. Optional: prepare a second application with read-only access for permission
    tests after the core demo.
@@ -38,8 +45,9 @@ documentation is the reference for the new folder interfaces.
 The suite creates scenario folders named
 `AAP-Demo-<scenario>-<demo_run_id>` inside the selected shared folder. CRUD and
 forced deletion are intentional in these QA fixtures. The confirmation flag
-is a guard against launching these templates with the wrong vault credentials;
-it does not grant permissions or verify that an account really is QA.
+is a guard against launching these templates with the wrong vault credentials.
+It does not grant permissions, and it cannot verify that the folder holds only
+test data.
 
 ## Configure AAP
 
@@ -77,7 +85,7 @@ extra_vars:
   keeper_config: "{{ keeper_config }}"
 ```
 
-Create a credential of that type and put the initialized QA configuration in
+Create a credential of that type and put the initialized PROD configuration in
 its secret input. Attach it to the demo job templates. Never put the
 configuration in the repository or ordinary template variables.
 
@@ -95,7 +103,8 @@ For playbooks 01-05 and 07:
 - Attach the KSM credential.
 - Set job type to **Run**, not **Check**. Playbook 03 applies check mode only
   to modules that support it.
-- Set verbosity to **3 Debug**, equivalent to `-vvv`.
+- Set verbosity to **5 (WinRM Debug)**, equivalent to `-vvvvv`. See
+  [Use the most verbose output](#use-the-most-verbose-output).
 - Leave job diffs disabled. Secret-copy tasks also disable their own diffs.
 
 These playbooks use `localhost` with a local connection. That is the
@@ -117,12 +126,25 @@ If `demo_run_id` is omitted, the playbook uses the AAP job ID or a UTC
 timestamp. Use an explicit ID when scanning logs or preparing an attachment.
 Use a fresh ID after a retained or interrupted run to avoid mixing evidence.
 
+### Use the most verbose output
+
+Set every demo job template to verbosity 5, the highest level in AAP. A lower
+level hides data from the job output, for example module arguments and debug
+messages. QA must see all of this data to find failures, security problems,
+and secret values in the output. Some debug messages of the KSM collection
+show only at level 5. Customers can also use this level. A secret value that
+shows only at level 5 is also a security problem.
+
+AAP has no level above 5. The KSM collection writes some debug messages only
+at level 6 (`-vvvvvv`). To see these messages, run the playbook from a
+workstation with `-vvvvvv`.
+
 ## Presenter sequence
 
 | Time | Action | Evidence to show |
 | --- | --- | --- |
 | 5 minutes | Explain template, job, execution environment, KSM application, and managed host | Where code runs and where credentials enter the job |
-| 10 minutes | Run `01_preflight.yml` | Collection locations, module resolution, SDK versions, live QA folder access |
+| 10 minutes | Run `01_preflight.yml` | Collection locations, module resolution, SDK versions, live test-folder access |
 | 10 minutes | Run `02_folder_record_lifecycle.yml` | Nested creation, reads, updates, stable UIDs, idempotence, safe and forced deletion |
 | 10 minutes | Run `03_validation_and_check_mode.yml` | Specific failures, unchanged vault state after check mode, rescue handling |
 | 10 minutes | Run `04_cache_and_complex_fields.yml` | Empty complex fields, snapshot behavior, unusable-cache warning and live fallback |
@@ -216,11 +238,11 @@ using only synthetic record values. Do not hide the main run upfront.
 
 Run `05_verbose_log_checks.yml` twice:
 
-1. **Diagnostic pass:** `demo_protect_sensitive_tasks: false`, verbosity 3.
+1. **Diagnostic pass:** `demo_protect_sensitive_tasks: false`, verbosity 5.
 2. **Protected pass:** `demo_protect_sensitive_tasks: true`, the same verbosity.
 
 Keep automatic cleanup enabled between these passes if reusing the same run
-ID. Optionally repeat at verbosity 4 for focused connection/internal logging.
+ID.
 
 The playbook does not deliberately debug retrieved secret values. It exercises
 normal task results, normalized record data, lookup, copy, base64-returning
@@ -235,7 +257,7 @@ rename messages and warnings even when the task result is censored.
 
 ### Scan exported evidence
 
-This repository is public. Store job exports, QA credentials, and local
+This repository is public. Store job exports, KSM configurations, and local
 attachments only under the ignored `aap_demo/artifacts/` directory, with
 appropriate local permissions. Ignoring a file is not encryption.
 
@@ -288,7 +310,7 @@ Classify each hit before reporting it:
 | The optional positive-control marker | Deliberately emitted scanner control |
 | Protected task values in normal results | Investigate whether protection was applied and honored |
 | Direct SDK/Display warnings or verbose messages | Inspect separately from censored task results |
-| Reusable configuration, private/app keys, initialization tokens | Sensitive credential exposure, including in QA |
+| Reusable configuration, private/app keys, initialization tokens | Sensitive credential exposure, also for a test application |
 | Folder names/UIDs decrypted from Ansible Vault | Encryption at rest is not output redaction |
 
 A local simulated-backend run of the pinned PR source with
@@ -317,7 +339,7 @@ mkdir -p aap_demo/artifacts
 printf 'QA_CANARY_FILE_demo-austin-victoria' > aap_demo/artifacts/aap-demo.txt
 ```
 
-Attach it to a QA record shared with the KSM application. Add these non-secret
+Attach it to a test record shared with the KSM application. Add these non-secret
 variables to the template:
 
 ```yaml
@@ -342,7 +364,7 @@ Retaining fixtures does not undo explicit delete operations already tested
 inside a scenario. It also does not keep temporary filesystem copies.
 
 Use `07_cleanup.yml` to remove a retained scenario folder. Supply its exact
-UID and name from the earlier job, alongside the same QA shared-folder UID
+UID and name from the earlier job, alongside the same test shared-folder UID
 and KSM credential. The playbook checks current identity and ancestry before
 forced deletion. If the folder is already absent, it sends no delete.
 
@@ -356,7 +378,8 @@ For each case record:
 
 - Job URL and template/playbook.
 - Playbook commit, PR source revision, image digest, and runtime versions.
-- QA application and shared-folder identifiers, without credential material.
+- Job verbosity. It must be 5.
+- Test application and shared-folder identifiers, without credential material.
 - Expected result and actual vault/host state.
 - Expected failures, idempotence results, and check-mode results.
 - Log-hit labels/locations and their classification.
@@ -396,5 +419,5 @@ done
 ```
 
 Syntax checks and mocked/local checks are not an AAP end-to-end pass. Complete
-the live runs and evidence inspection in the QA environment before treating
-the suite as validated on your platform.
+the live AAP runs with the PROD configuration and inspect the evidence. Only
+then treat the suite as validated on your platform.
