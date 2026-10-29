@@ -11,14 +11,24 @@ Run it with PYTHONPATH pointing at a source tree to compare a pre-fix and a post
 """
 import json
 import logging
+import os
 import sys
 
 from keeper_secrets_manager_core import SecretsManager
 from keeper_secrets_manager_core.keeper_globals import logger_name
 from keeper_secrets_manager_core.storage import FileKeyValueStorage
 
-import keeper_secrets_manager_ansible as ksm
-from keeper_secrets_manager_ansible import KeeperAnsible
+try:
+    import keeper_secrets_manager_ansible as ksm
+except ModuleNotFoundError:
+    # An execution environment installs the collection, not the pip package. Import the copy bundled in the collection.
+    for root in (os.environ.get("ANSIBLE_COLLECTIONS_PATH", "") + ":/usr/share/ansible/collections:"
+                 + os.path.expanduser("~/.ansible/collections")).split(":"):
+        if root and os.path.isdir(os.path.join(root, "ansible_collections")) and root not in sys.path:
+            sys.path.append(root)
+    from ansible_collections.keepersecurity.keeper_secrets_manager.plugins.common import (
+        keeper_secrets_manager_ansible as ksm)
+KeeperAnsible = ksm.KeeperAnsible
 
 
 def build_cases(a):
