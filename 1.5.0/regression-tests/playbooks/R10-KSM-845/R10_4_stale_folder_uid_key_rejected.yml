@@ -7,9 +7,6 @@
   collections:
     - keepersecurity.keeper_secrets_manager
 
-  vars:
-    keeper_config_file: "{{ config_file }}"
-
   tasks:
     - name: Attempt create using the old folder_uid key
       keeper_create:

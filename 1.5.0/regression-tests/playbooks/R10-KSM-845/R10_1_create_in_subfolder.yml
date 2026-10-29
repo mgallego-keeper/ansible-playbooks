@@ -8,7 +8,6 @@
     - keepersecurity.keeper_secrets_manager
 
   vars:
-    keeper_config_file: "{{ config_file }}"
     subfolder_name: "R10-KSM-845 Regression Subfolder"
 
   tasks:
@@ -39,13 +38,27 @@
         success_msg: "PASS [R10.1]: Record created — UID: {{ created.record_uid }}"
         fail_msg: "FAIL [R10.1]: No record_uid returned"
 
+    # The AAP credential injects keeper_config (base64) and no file, but the helper script needs a config file.
+    - name: Create temp file for the decoded KSM config
+      tempfile:
+        state: file
+        suffix: .json
+      register: placement_config
+
+    - name: Write decoded KSM config to the temp file
+      copy:
+        content: "{{ keeper_config | b64decode }}"
+        dest: "{{ placement_config.path }}"
+        mode: "0600"
+      no_log: true
+
     - name: Verify record lands in the subfolder
       # argv form, not an interpolated string — avoids shlex word-splitting on config paths with spaces.
       command:
         argv:
           - "{{ ansible_playbook_python }}"
           - "{{ playbook_dir }}/verify_folder_placement.py"
-          - "{{ keeper_config_file }}"
+          - "{{ placement_config.path }}"
           - "{{ test_folder.folder_uid }}"
           - "{{ created.record_uid }}"
       register: placement_check
@@ -62,4 +75,10 @@
     - name: Cleanup
       keeper_remove:
         uid: "{{ created.record_uid }}"
+      ignore_errors: yes
+
+    - name: Remove temp KSM config file
+      file:
+        path: "{{ placement_config.path }}"
+        state: absent
       ignore_errors: yes

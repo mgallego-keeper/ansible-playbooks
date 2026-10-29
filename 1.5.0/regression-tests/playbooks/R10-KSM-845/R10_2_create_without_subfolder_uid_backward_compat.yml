@@ -7,9 +7,6 @@
   collections:
     - keepersecurity.keeper_secrets_manager
 
-  vars:
-    keeper_config_file: "{{ config_file }}"
-
   tasks:
     - name: Create record with subfolder_uid omitted
       keeper_create:
